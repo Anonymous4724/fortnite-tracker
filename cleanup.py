@@ -24,7 +24,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # What actually gets launched directly — everything else has to be reachable from here.
 ENTRY_POINTS = ["app.py", "cleanup.py", "recompute_scoring.py", "backtest.py",
                 "explore_history.py", "import_history.py", "check_forms.py",
-                "fuzz_api.py", "selfcheck.py", "harvest_osirion.py",
+                "fuzz_api.py", "selfcheck.py", "harvest_osirion.py", "export_model.py",
                 "test_osirion.py"]
 
 def always_keep() -> set[str]:
@@ -33,7 +33,7 @@ def always_keep() -> set[str]:
     Computed at runtime rather than hardcoded, so a new launcher or a new
     key file doesn't need to be declared here.
     """
-    keep = {"requirements.txt", ".gitignore", "LICENSE"}
+    keep = {"requirements.txt", ".gitignore", "LICENSE", "model.json"}
     for name in os.listdir(HERE):
         if os.path.isdir(os.path.join(HERE, name)):
             continue
@@ -176,13 +176,20 @@ def collect(paths):
 
 
 def scan():
-    groups, total = [], 0
+    """Group what can go, without listing anything twice.
+
+    A renamed file is both a known leftover and unreachable from the code, so
+    it used to appear in two groups and the second removal failed on a file
+    that was already gone.
+    """
+    groups, total, seen = [], 0, set()
     for title, why, paths in LEGACY:
-        items, size = collect(paths)
+        items, size = collect([p for p in paths if p not in seen])
         if items:
+            seen.update(rel for rel, _, _ in items)
             groups.append((title, why, items))
             total += size
-    extra, size = collect(orphans(reachable()))
+    extra, size = collect([p for p in orphans(reachable()) if p not in seen])
     if extra:
         groups.append(("Files no longer linked to the app",
                        "No import, no render_template, no reference reaches them.",
