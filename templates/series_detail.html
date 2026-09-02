@@ -1,0 +1,208 @@
+{% extends "base.html" %}
+{% set active = 'series' %}
+{% block title %}{{ serie.name }} — Fortnite Comp Tracker{% endblock %}
+{% block content %}
+
+<a href="/series" class="muted small">&larr; {{ _("All series") }}</a>
+<h1>{{ serie.name }}</h1>
+<div style="margin-bottom:18px">
+  <span class="tag accent">{{ serie.region }}</span>
+  <span class="tag">{{ serie.team_mode }}</span>
+  <span class="tag">{{ serie.game_mode }}</span>
+  <span class="tag">{{ serie.stages|length }} {{ _("Stage") }}{{ 's' if serie.stages|length > 1 }}</span>
+</div>
+
+<div class="card">
+  <h2>{{ _("New edition") }}</h2>
+  <form onsubmit="return newEdition(event)" class="row" style="align-items:flex-end">
+    <div style="flex:0 0 190px">
+      <label>{{ _("Date of the first stage") }}</label>
+      <input type="date" name="date" value="{{ today }}" required>
+    </div>
+    <div style="flex:0 0 190px">
+      <label>{{ _("Edition name") }} ({{ _("optional") }})</label>
+      <input name="label" placeholder="{{ _("e.g.") }} {{ _("Week 3") }}">
+    </div>
+    <div style="flex:0 0 auto"><button type="submit">{{ _("Create the stages") }}</button></div>
+  </form>
+  <p class="small muted" style="margin:12px 0 0">
+    {{ _("Creates in one go:") }}
+    {% for st in serie.stages %}<b>{{ st.name }}</b> ({{ _("D+") }}{{ st.day_offset }} {{ _("at") }} {{ st.start }},
+      {{ st.max_games }} {{ _("Games") }} {{ _("sealed") if st.games_mode == 'sealed' else _("max") }},
+      tops {{ st.ranks|join('/') }}){{ ', ' if not loop.last }}{% endfor %}.
+  </p>
+</div>
+
+<h2 style="margin-top:26px">{{ _("Edition") }}s</h2>
+{% if not editions %}
+  <div class="card empty">{{ _("No edition yet. Create the first one above.") }}</div>
+{% endif %}
+
+{% for ed in editions %}
+<div class="card">
+  <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px">
+    <b>{{ ed.edition }}</b>
+    <span class="small muted">{{ ed.date[:10] }}</span>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>{{ _("Stage") }}</th><th>{{ _("Start") }}</th><th class="num">{{ _("measurements") }}</th>
+                 <th>{{ _("Tracked ranks") }}</th><th>{{ _("Status") }}</th></tr></thead>
+      <tbody>
+        {% for c in ed.stages %}
+        <tr>
+          <td><a href="/competition/{{ c.id }}">{{ c.stage or c.name }}</a></td>
+          <td class="small muted">{{ c.start_time[:16] }} → {{ c.end_time[11:16] if c.end_time else '?' }}</td>
+          <td class="num">{{ c.n_snapshots }}</td>
+          <td class="small mono">{{ c.ranks|join(', ') }}</td>
+          <td>
+            {% if c.finished %}<span class="tag done">{{ _("finished") }}</span>
+            {% elif c.n_snapshots %}<span class="tag live">{{ _("live") }}</span>
+            {% else %}<span class="tag">{{ _("to come") }}</span>{% endif %}
+            {% if c.finalised %}<span class="tag accent">{{ _("results") }}</span>{% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endfor %}
+
+<details class="card">
+  <summary>{{ _("Series settings") }}</summary>
+  <form onsubmit="return saveSeries(event)" style="margin-top:14px">
+    <div class="row" style="margin-bottom:12px">
+      <div style="flex:2 1 240px"><label>{{ _("Name") }}</label>
+        <input name="name" value="{{ serie.name }}"></div>
+      <div><label>{{ _("Region") }}</label>
+        <select name="region">
+          {% for r in regions %}<option {{ 'selected' if r == serie.region }}>{{ r }}</option>{% endfor %}
+        </select></div>
+      <div><label>{{ _("Mode") }}</label>
+        <select name="team_mode">
+          {% for m in team_modes %}<option {{ 'selected' if m == serie.team_mode }}>{{ m }}</option>{% endfor %}
+        </select></div>
+      <div><label>{{ _("Match type") }}</label>
+        <select name="game_mode">
+          {% for g in game_modes %}<option {{ 'selected' if g == serie.game_mode }}>{{ g }}</option>{% endfor %}
+        </select></div>
+      <div><label>{{ _("Scoring system") }}</label>
+        <select name="scoring_id">
+          <option value="">— {{ _("none") }} —</option>
+          {% for s in scorings %}
+            <option value="{{ s.id }}" {{ 'selected' if s.id == serie.scoring_id }}>{{ s.name }}</option>
+          {% endfor %}
+        </select></div>
+    </div>
+    <h3>{{ _("Stages") }}</h3>
+    <div id="stages"></div>
+    <button type="button" class="ghost small" onclick="addStage()">+ {{ _("Add a stage") }}</button>
+    <div class="row tight" style="margin-top:16px">
+      <button type="submit">{{ _("Save the series") }}</button>
+      <button type="button" class="danger" onclick="deleteSeries()">{{ _("Delete the series") }}</button>
+    </div>
+    <p class="small muted" style="margin-top:10px">
+      {{ _("Editing the stages only affects editions created afterwards. Deleting the series does not delete tournaments already created.") }}
+    </p>
+  </form>
+</details>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+const SERIE = {{ serie | tojson }};
+let STAGES = SERIE.stages;
+
+function stageCard(st, i) {
+  return `<div class="card" style="padding:12px;margin-bottom:10px;background:var(--panel-2)">
+    <div class="row" style="margin-bottom:8px">
+      <div style="flex:2 1 130px"><label>${T('Name')}</label>
+        <input value="${st.name}" oninput="setStage(${i}, 'name', this.value)"></div>
+      <div style="flex:1 1 60px"><label>${T('Day')}</label>
+        <input type="number" value="${st.day_offset}" oninput="setStage(${i}, 'day_offset', this.value)"></div>
+      <div style="flex:1 1 80px"><label>${T('Time')}</label>
+        <input type="time" value="${st.start}" oninput="setStage(${i}, 'start', this.value)"></div>
+      <div><label>${T('Duration (min)')}</label>
+        <input type="number" value="${st.duration_min}" oninput="setStage(${i}, 'duration_min', this.value)"></div>
+      <div><label>${T('Game')} (min)</label>
+        <input type="number" value="${st.game_minutes}" oninput="setStage(${i}, 'game_minutes', this.value)"></div>
+      <div><label>${T('Games')}</label>
+        <input type="number" value="${st.max_games}" oninput="setStage(${i}, 'max_games', this.value)"></div>
+      <div style="flex:2 1 170px"><label>${T('Counting mode')}</label>
+        <select onchange="setStage(${i}, 'games_mode', this.value); renderStages()">
+          <option value="max" ${st.games_mode !== 'sealed' ? 'selected' : ''}>${T('Maximum')}</option>
+          <option value="sealed" ${st.games_mode === 'sealed' ? 'selected' : ''}>${T('Sealed')}</option>
+        </select></div>
+      ${st.games_mode === 'sealed' ? `<div><label>${T('Interval')} (min)</label>
+        <input type="number" value="${st.slot_minutes || 35}" oninput="setStage(${i}, 'slot_minutes', this.value)"></div>` : ''}
+      <div style="flex:2 1 160px"><label>${T('Tracked ranks')}</label>
+        <input value="${st.ranks.join(', ')}" oninput="setStage(${i}, 'ranks', this.value)"></div>
+      <div style="flex:0 0 auto;display:flex;align-items:flex-end">
+        <button type="button" class="danger small" onclick="removeStage(${i})">${T('Remove')}</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+function renderStages() {
+  document.getElementById('stages').innerHTML = STAGES.map(stageCard).join('');
+}
+
+function setStage(i, key, value) {
+  if (key === 'ranks') {
+    STAGES[i].ranks = value.split(/[,;]/).map(v => parseInt(v, 10)).filter(v => v > 0);
+  } else if (key === 'name' || key === 'start' || key === 'games_mode') {
+    STAGES[i][key] = value;
+  } else {
+    STAGES[i][key] = parseFloat(value) || 0;
+  }
+}
+
+function addStage() {
+  const last = STAGES[STAGES.length - 1] || {};
+  STAGES.push({ name: T('Final'), day_offset: (last.day_offset || 0) + 1, start: last.start || '19:00',
+                duration_min: last.duration_min || 180, ranks: [1, 3, 5, 10, 20],
+                max_games: 6, game_minutes: last.game_minutes || 30,
+                tracker_lag_min: 5, games_mode: 'sealed', slot_minutes: 35 });
+  renderStages();
+}
+
+function removeStage(i) {
+  if (STAGES.length <= 1) return toast(T('You need at least one stage.'), true);
+  STAGES.splice(i, 1);
+  renderStages();
+}
+
+function newEdition(ev) {
+  ev.preventDefault();
+  const data = Object.fromEntries(new FormData(ev.target).entries());
+  api('/api/series/' + SERIE.id + '/editions', 'POST', data).then(r => {
+    if (!r.ok) return toast(r.error || T('Error'), true);
+    toast(r.ids.length + ' ' + T('stage(s) created'));
+    setTimeout(() => location.reload(), 700);
+  });
+  return false;
+}
+
+function saveSeries(ev) {
+  ev.preventDefault();
+  const data = Object.fromEntries(new FormData(ev.target).entries());
+  data.stages = STAGES;
+  api('/api/series/' + SERIE.id, 'PUT', data).then(r => {
+    if (!r.ok) return toast(r.error || T('Error'), true);
+    toast(T('Series saved'));
+    setTimeout(() => location.reload(), 700);
+  });
+  return false;
+}
+
+function deleteSeries() {
+  if (!confirm(T('Delete the series "%s"?\n\nTournaments already created are kept.').replace('%s', SERIE.name))) return;
+  api('/api/series/' + SERIE.id, 'DELETE').then(() => { location.href = '/series'; });
+}
+
+renderStages();
+</script>
+{% endblock %}

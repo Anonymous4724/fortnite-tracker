@@ -1,0 +1,189 @@
+{% extends "base.html" %}
+{% set active = 'dash' %}
+{% block title %}{{ _("Tournaments") }} — Fortnite Comp Tracker{% endblock %}
+{% block content %}
+
+{% if not has_key %}
+<div class="card" style="border-color:#24486e">
+  <h2>{{ _("Connect your Cito account") }}</h2>
+  <p class="small muted" style="margin-top:-8px">
+    {{ _("The app fetches tournaments and standings automatically. It needs your Cito API key, free to create at citoapi.com (500 requests a month).") }}
+  </p>
+  <div class="row tight" style="align-items:flex-end">
+    <div style="flex:1 1 320px">
+      <label>{{ _("API key") }}</label>
+      <input id="api-key" placeholder="cito_…" autocomplete="off">
+    </div>
+    <button onclick="saveKey()">{{ _("Save") }}</button>
+  </div>
+</div>
+{% endif %}
+
+<div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:4px">
+  <h1>{{ _("Live") }}</h1>
+  <span class="small muted" id="live-count"></span>
+  <span class="spacer"></span>
+  <a class="btn ghost small" href="/?refresh=1">{{ _("Refresh the list") }}</a>
+</div>
+
+{% if error %}
+  <div class="card" style="border-left:3px solid var(--danger)">
+    <b>{{ _("The list could not be fetched.") }}</b>
+    <div class="small muted" style="margin-top:6px">{{ error }}</div>
+  </div>
+{% elif not events %}
+  <div class="card">
+    <div class="empty" style="padding:26px 20px 14px">
+      <b>{{ _("No tournament currently running on the API.") }}</b><br>
+      <span class="small">{{ _("The endpoint only shows what's running right now. EU tournaments usually start in late afternoon.") }}</span>
+    </div>
+    <div class="row tight" style="justify-content:center;margin-bottom:14px">
+      <button class="ghost small" onclick="searchWide(this)">{{ _("Search wider (1 request)") }}</button>
+      <a class="btn ghost small" href="/?refresh=1">{{ _("Retry") }}</a>
+    </div>
+    <details style="max-width:640px;margin:0 auto">
+      <summary>{{ _("API response detail") }}</summary>
+      <table class="small" style="margin-top:8px"><tbody>
+        <tr><td>{{ _("Endpoint queried") }}</td><td class="mono">{{ meta.path or '—' }}</td></tr>
+        <tr><td>{{ _("Entries received") }}</td><td class="num">{{ meta.raw if meta.raw is not none else '—' }}</td></tr>
+        <tr><td>{{ _("Entries kept") }}</td><td class="num">{{ meta.kept if meta.kept is not none else '—' }}</td></tr>
+        <tr><td>{{ _("Reported freshness") }}</td><td>{{ meta.freshness or '—' }}</td></tr>
+        <tr><td>{{ _("Data dated") }}</td><td>{{ meta.updated or '—' }}</td></tr>
+        <tr><td>{{ _("API message") }}</td><td>{{ meta.message or '—' }}</td></tr>
+        {% if meta.fields %}<tr><td>{{ _("Fields seen") }}</td>
+          <td class="small mono">{{ meta.fields|join(', ') }}</td></tr>{% endif %}
+        <tr><td>{{ _("Last polled") }}</td>
+            <td>{{ fetched_at.strftime('%H:%M:%S') if fetched_at else '—' }}</td></tr>
+      </tbody></table>
+      <p class="small muted" style="margin-top:8px">
+        {{ _('If "entries received" is 0, the API genuinely has no tournament running. If it receives some but keeps none, the field names have changed — send me that list.') }}
+      </p>
+    </details>
+  </div>
+{% else %}
+<div class="row tight" style="margin-bottom:10px">
+  <span class="spacer"></span>
+  <button class="ghost small" onclick="dumpRaw(this)"
+          title="{{ _("Writes the API's raw response to data/raw_events.json") }}">
+    {{ _("Export raw data (0 requests)") }}</button>
+</div>
+<div class="live-grid">
+  {% for e in events %}
+  <div class="live-card {{ 'on' if e.tracked }}">
+    <div class="head">
+      <h3>{{ e.name }}</h3>
+      <div class="meta">
+        <span class="tag accent">{{ e.region }}</span>
+        <span class="tag">{{ e.start_time[11:16] if e.start_time }} → {{ e.end_time[11:16] if e.end_time }}</span>
+      </div>
+      <div class="meta" style="margin-top:8px">
+        {% if e.prizes %}
+          {% for p in e.prizes %}<span class="tag">{{ p }}</span>{% endfor %}
+        {% elif e.format_hint %}
+          <span class="muted">{{ e.format_hint }}</span>
+        {% endif %}
+      </div>
+    </div>
+    <div class="foot">
+      {% if e.tracked %}
+        <span class="small" style="color:var(--ok)"><span class="dot"></span>{{ _("tracking") }}</span>
+        <span class="spacer"></span>
+        <a class="btn" href="/tracking/{{ e.competition_id }}">{{ _("Open") }}</a>
+        <a class="btn ghost small" href="/prepare/{{ e.competition_id }}">{{ _("Settings") }}</a>
+      {% else %}
+        <button onclick="startTracking(this, '{{ e.event_id }}', '{{ e.window_id }}')">
+          {{ _("Start predicting") }}</button>
+        <span class="small muted">{{ _("1 request") }}</span>
+      {% endif %}
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+<h1 style="margin-top:34px">{{ _("Tracked tournaments") }}</h1>
+
+
+{% if not groups %}
+  <div class="card empty">{{ _("Nothing yet. Start tracking a live tournament above.") }}</div>
+{% endif %}
+
+{% for name, comps in groups.items() %}
+<div class="card">
+  <h2>{{ name }} <span class="tag">{{ comps|length }}</span></h2>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>{{ _("Tournament") }}</th><th>{{ _("Date") }}</th><th class="num">{{ _("measurements") }}</th>
+                 <th>{{ _("Final thresholds") }}</th><th></th></tr></thead>
+      <tbody>
+        {% for c in comps %}
+        <tr>
+          <td>{{ c.name }}</td>
+          <td class="small muted">{{ c.start_time[:16] }}</td>
+          <td class="num">{{ c.n_snapshots }}</td>
+          <td class="small mono muted">
+            {% for rank, pts in c.thresholds|dictsort %}top {{ rank }} : {{ pts|round(0)|int }}{{ ' · ' if not loop.last }}{% endfor %}
+          </td>
+          <td class="right"><a class="btn ghost small" href="/tracking/{{ c.id }}">{{ _("View") }}</a></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endfor %}
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.getElementById('live-count').textContent =
+  {{ events|length }} + ' ' + T('tournament(s)') + ' · ' + T('list cached for a few minutes');
+
+function saveKey() {
+  const key = document.getElementById('api-key').value.trim();
+  if (!key) return toast(T('Paste your Cito key.'), true);
+  api('/api/cito-key', 'POST', { key }).then(r => {
+    if (!r.ok) return toast(r.error || T('Error'), true);
+    toast(T('Key saved'));
+    setTimeout(() => location.href = '/?refresh=1', 600);
+  });
+}
+
+function dumpRaw(btn) {
+  btn.disabled = true;
+  api('/api/live/raw', 'POST', {}).then(r => {
+    btn.disabled = false;
+    if (!r.ok) return toast(r.error || T('Error'), true);
+    toast(r.n + ' ' + T('tournament(s)') + ' ' + T('written to data/raw_events.json'));
+  });
+}
+
+function searchWide(btn) {
+  btn.disabled = true;
+  btn.textContent = T('Searching…');
+  api('/api/live/search-wide', 'POST', {}).then(r => {
+    btn.disabled = false;
+    btn.textContent = T('Search wider (1 request)');
+    if (!r.ok) return toast(r.error || T('Error'), true);
+    const n = (r.events || []).length;
+    if (!n) return toast(T("This endpoint doesn't see any tournament running either."), true);
+    toast(n + ' ' + T('tournament(s)') + ' ' + T('found'));
+    setTimeout(() => location.reload(), 700);
+  });
+}
+
+function startTracking(btn, eventId, windowId) {
+  btn.disabled = true;
+  btn.textContent = T('Fetching…');
+  api('/api/live/import', 'POST', { event_id: eventId, window_id: windowId }).then(r => {
+    if (!r.ok) {
+      btn.disabled = false;
+      btn.textContent = T('Start predicting');
+      return toast(r.error || T('Error'), true);
+    }
+    location.href = '/prepare/' + r.competition_id;
+  });
+}
+</script>
+{% endblock %}

@@ -1,0 +1,406 @@
+{% extends "base.html" %}
+{% set active = 'train' %}
+{% block title %}{{ _("Train") }} — Fortnite Comp Tracker{% endblock %}
+{% block content %}
+
+<h1>{{ _("Train the estimate") }}</h1>
+
+<div class="panes" style="grid-template-columns:minmax(340px,1fr) minmax(320px,420px)">
+
+  <div class="pane">
+    <h2>{{ _("The tournament") }}</h2>
+    <div class="row">
+      <div style="flex:2 1 200px"><label>{{ _("Tournament") }}</label>
+        <input id="kind" list="kinds" placeholder="FNCS Division 1 Practice"
+               oninput="onKindChange()">
+        <datalist id="kinds">
+          {% for f in families %}<option value="{{ f }}">{% endfor %}
+        </datalist></div>
+      <div style="flex:1 1 140px"><label>{{ _("Stage") }}</label>
+        <input id="stage" list="stages" placeholder="{{ _('no stage') }}" oninput="onKindChange()">
+        <datalist id="stages">
+          {% for s in stages %}{% if s %}<option value="{{ s }}">{% endif %}{% endfor %}
+        </datalist></div>
+      <div><label>{{ _("Region") }}</label>
+        <select id="region" onchange="onKindChange()">
+          {% for r in regions %}<option {{ 'selected' if r == 'EU' }}>{{ r }}</option>{% endfor %}
+        </select></div>
+    </div>
+    <div class="row" style="margin-top:12px">
+      <div><label>{{ _("Mode") }}</label>
+        <select id="team_mode">
+          {% for m in team_modes %}<option {{ 'selected' if m == 'Duo' }}>{{ m }}</option>{% endfor %}
+        </select></div>
+      <div><label>{{ _("Type") }}</label>
+        <select id="game_mode">
+          {% for g in game_modes %}<option>{{ g }}</option>{% endfor %}
+        </select></div>
+      <div><label>{{ _("Max games") }}</label>
+        <input type="number" id="max_games" value="10"></div>
+      <div><label>{{ _("Duration (min)") }}</label>
+        <input type="number" id="duration_min" value="180"></div>
+      <div><label>{{ _("Ranked teams") }}</label>
+        <input type="number" id="field_size" placeholder="{{ _('field size') }}"></div>
+    </div>
+    <div id="kind-info" class="small muted" style="margin-top:10px"></div>
+
+    <h2 style="margin-top:22px">{{ _("The scoring") }}</h2>
+    <div class="row" style="align-items:flex-start">
+      <div style="flex:1 1 180px">
+        <label>{{ _("Saved scoring") }}</label>
+        <select id="scoring_id" onchange="applyScoring()">
+          <option value="">— {{ _("entered here") }} —</option>
+          {% for s in scorings %}<option value="{{ s.id }}">{{ s.name }}</option>{% endfor %}
+        </select>
+        <label style="margin-top:12px">{{ _("Points per elimination") }}</label>
+        <input type="number" step="any" id="kill" value="{{ default_scoring.kill }}">
+        <label style="margin-top:12px">{{ _("Elimination cap per game") }}</label>
+        <input type="number" min="0" id="kill_cap" placeholder="{{ _('none') }}">
+      </div>
+      <div style="flex:1 1 220px">
+        <label>{{ _("Placement points") }}</label>
+        <textarea id="placement" rows="9" class="mono" style="resize:vertical"
+                  placeholder="1st&#9;65&#10;2nd&#9;56&#10;…"></textarea>
+        <div id="placement-hint" class="small muted" style="margin-top:6px"></div>
+      </div>
+    </div>
+
+    <h2 style="margin-top:22px">{{ _("The tier") }}</h2>
+    <div class="row">
+      <div style="flex:2 1 160px"><label>{{ _("Name") }}</label>
+        <input id="goal_label" placeholder="{{ _('Qualification') }}"></div>
+      <div><label>{{ _("Rank") }}</label>
+        <input type="number" id="goal_rank" value="500"></div>
+      <div><label>{{ _("Edition date") }}</label>
+        <input type="date" id="date" value="{{ today }}"></div>
+      <div style="flex:1 1 130px"><label>{{ _("Edition") }} <span class="muted">— {{ _("optional") }}</span></label>
+        <input id="edition" placeholder="{{ _('Week 3') }}"></div>
+    </div>
+
+    <div class="row tight" style="margin-top:18px">
+      <button onclick="estimate()" id="btn-estimate">{{ _("Estimate") }}</button>
+    </div>
+  </div>
+
+  <div class="pane">
+    <h2>{{ _("Estimation") }}</h2>
+    <div id="estimate"><p class="small muted">{{ _("Fill in the form and click Estimate.") }}</p></div>
+
+    <div id="correction" class="hidden" style="margin-top:22px">
+      <h2>{{ _("Real threshold") }}</h2>
+      <div class="row tight" style="align-items:flex-end">
+        <div style="flex:1 1 120px"><label>{{ _("Points at rank") }} <b id="goal-echo"></b></label>
+          <input type="number" step="any" id="real" placeholder="{{ _('read on the tracker') }}"></div>
+        <button onclick="saveReal()" id="btn-save">{{ _("Save") }}</button>
+      </div>
+      <div id="verdict" style="margin-top:14px"></div>
+    </div>
+
+    <div style="margin-top:22px">
+      <h2>{{ _("Recorded editions") }} <span class="tag" id="entries-n"></span></h2>
+      <p class="small muted" style="margin-top:-6px">
+        {{ _("They are what the estimate rests on. Correct or delete freely.") }}</p>
+      <div id="entries"></div>
+    </div>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+const APP_VERSION = {{ app_version | tojson }};
+const CATEGORIES = {{ categories | tojson }};
+const SCORINGS = {{ scorings | tojson }};
+const OBJECTIVES = {{ objectives | tojson }};
+let LAST = null;
+
+function scoringNow() {
+  const s = textToScoring(document.getElementById('placement').value,
+                          document.getElementById('kill').value);
+  s.kill_cap = Number(document.getElementById('kill_cap').value) || null;
+  return s;
+}
+
+function payload() {
+  return {
+    kind: document.getElementById('kind').value.trim(),
+    stage: document.getElementById('stage').value.trim(),
+    region: document.getElementById('region').value,
+    team_mode: document.getElementById('team_mode').value,
+    game_mode: document.getElementById('game_mode').value,
+    max_games: Number(document.getElementById('max_games').value) || 10,
+    duration_min: Number(document.getElementById('duration_min').value) || 180,
+    field_size: Number(document.getElementById('field_size').value) || 0,
+    scoring: scoringNow(),
+    rank: Number(document.getElementById('goal_rank').value) || 0,
+  };
+}
+
+function categoryLabel() {
+  const fam = document.getElementById('kind').value.trim();
+  const stage = document.getElementById('stage').value.trim();
+  return stage ? `${fam} · ${stage}` : fam;
+}
+
+function onKindChange() {
+  const kind = categoryLabel();
+  const region = document.getElementById('region').value;
+  const hit = CATEGORIES.find(c => c.kind === kind && c.region === region)
+           || CATEGORIES.find(c => c.kind === kind);
+  const box = document.getElementById('kind-info');
+  if (!hit) { box.textContent = kind ? T('Unknown category.') : ''; return; }
+  document.getElementById('max_games').value = hit.max_games;
+  document.getElementById('team_mode').value = hit.team_mode;
+  document.getElementById('game_mode').value = hit.game_mode;
+  const champ = document.getElementById('field_size');
+  if (hit.field_size && !champ.value) champ.value = hit.field_size;
+  if (hit.scoring) {
+    document.getElementById('kill').value = hit.scoring.kill;
+    document.getElementById('kill_cap').value = hit.scoring.kill_cap || '';
+    document.getElementById('placement').value = scoringToText(hit.scoring);
+  }
+  box.textContent = `${hit.n} ${T('known tournament(s)')}`
+    + (hit.has_scoring ? ' · ' + T('scoring reused') : ' · ' + T('scoring to fill in'));
+  const goal = OBJECTIVES.find(o => o.kind === kind && o.region === region);
+  if (goal) {
+    document.getElementById('goal_rank').value = goal.rank;
+    document.getElementById('goal_label').value = goal.label;
+  }
+}
+
+function applyScoring() {
+  const s = SCORINGS.find(x => x.id === Number(document.getElementById('scoring_id').value));
+  if (!s) return;
+  document.getElementById('kill').value = s.kill;
+  document.getElementById('kill_cap').value = s.kill_cap || '';
+  document.getElementById('placement').value = scoringToText(s);
+}
+
+function estimate() {
+  const data = payload();
+  if (!data.kind) return toast(T('Give a tournament name.'), true);
+  if (!data.rank) return toast(T("Indicate the tier's rank."), true);
+  if (!data.scoring.placement.length) return toast(T('The placement scoring is empty.'), true);
+  const btn = document.getElementById('btn-estimate');
+  btn.disabled = true;
+  api('/api/estimate', 'POST', data).then(r => {
+    btn.disabled = false;
+    if (!r.ok) return toast(r.error || T('Error'), true);
+    LAST = { ...data, estimate: r.estimate, n_comps: r.n_comps, scope: r.scope,
+             reason: r.reason, version: r.version };
+    if (r.version && r.version !== APP_VERSION) {
+      toast(T('The server is running v') + r.version + ' ' + T('and the page v') + APP_VERSION
+            + ' — ' + T('restart') + ' lancer_windows.bat.', true);
+    }
+    renderEstimate();
+  });
+}
+
+function renderEstimate() {
+  const box = document.getElementById('estimate');
+  const label = document.getElementById('goal_label').value.trim() || T('Tier');
+  document.getElementById('goal-echo').textContent = LAST.rank;
+  document.getElementById('correction').classList.remove('hidden');
+  if (!LAST.estimate) {
+    box.innerHTML = `<p class="small" style="color:var(--warn)">${T('No comparable finished tournament — no estimate possible. Enter the real threshold below: it will become the first reference.')}</p>`;
+    return;
+  }
+  const e = LAST.estimate;
+  const SRC = { category: T('editions from the same category'), family: T('same tournament, other regions'),
+                mode: T('same game type'), scoring: T('scoring') + ', ' + T('measured ratio'),
+                'scoring (prior)': T('scoring only') + ' — ' + T('ratio not measured'),
+                'scoring (thin sample)': T('scoring only') };
+  box.innerHTML = `
+    <div class="pred">
+      <div class="rank">${label} · top ${LAST.rank}</div>
+      <div class="val">${fmtNum(e.value)}</div>
+      <div class="range">${fmtNum(e.low)} – ${fmtNum(e.high)}</div>
+      ${e.share ? `<div class="now">${e.share} % ${T('of')} ${fmtNum(e.field)} ${T('teams')}${
+          e.guessed_field ? ' (' + T('assumed') + ')' : ''}</div>` : ''}
+    </div>
+    ${e.guessed_field ? `<p class="small muted" style="margin:10px 0 0">
+      ${T('Assumed number of teams:')} ${fmtNum(e.field)}, ${T('based on')} ${
+        e.guessed_field === 'category' ? T('editions from this category')
+        : e.guessed_field === 'family' ? T('this tournament in other regions')
+        : T('tournaments of the same type')}. ${T("It doesn't matter that it's approximate:")}
+      ${T('a 30% error only moves the estimate by')} ${e.field_effect} %.</p>` : ''}
+    ${String(e.source).startsWith('scoring (prior') ? `<p class="small"
+      style="color:var(--warn);margin:10px 0 0">${T('No comparable edition: the scale comes from a scoring → points ratio not measured for this format. Enter a real threshold below and the estimate will stop guessing.')}</p>` : ''}
+    <table class="small" style="margin-top:10px"><tbody>
+      ${e.level ? `<tr><td>${T('Level (top')} ${e.ref_rank})</td>
+        <td class="num">${fmtNum(e.level)}</td></tr>` : ''}
+      <tr><td>${T('Scale taken from')}</td><td class="num">${SRC[e.source] || e.source || '—'}</td></tr>
+      <tr><td>${T('Comparable history')}</td><td class="num">${LAST.n_comps} ${T('tournament(s)')}</td></tr>
+      ${e.field_effect !== undefined ? `<tr><td>${T('If the field changes by 30%')}</td>
+        <td class="num">${T('the estimate moves by')} ${e.field_effect} %</td></tr>` : ''}
+    </tbody></table>`;
+}
+
+/* ---------------- editions already entered ---------------- */
+let ENTRIES = [];
+let OUVERTE = null;
+
+function context() {
+  return { family: document.getElementById('kind').value.trim(),
+           stage: document.getElementById('stage').value.trim(),
+           region: document.getElementById('region').value };
+}
+
+function chargerSaisies() {
+  const q = context();
+  if (!q.family) { ENTRIES = []; return renderEntries(); }
+  const url = '/api/history/entries?family=' + encodeURIComponent(q.family)
+            + '&stage=' + encodeURIComponent(q.stage)
+            + '&region=' + encodeURIComponent(q.region);
+  api(url).then(r => { ENTRIES = r.items || []; renderEntries(); });
+}
+
+function renderEntries() {
+  document.getElementById('entries-n').textContent = ENTRIES.length;
+  document.getElementById('entries').innerHTML = ENTRIES.map(s => {
+    const rows = Object.entries(s.thresholds)
+      .map(([r, v]) => `top ${r} = ${fmtNum(v)}`).join(' · ') || T('no threshold');
+    if (s.id !== OUVERTE) {
+      return `<div class="pick" onclick="openEntry(${s.id})">
+        <div><b>${s.date}</b>${s.edition ? ' · ' + s.edition : ''}
+          <div class="small muted">${rows} · ${s.field_size || '—'} ${T('teams')} ·
+            ${s.max_games} ${T('games')}</div></div>
+        <span class="small muted">${T('edit')}</span>
+      </div>`;
+    }
+    const lignes = Object.entries(s.thresholds).map(([r, v], i) => `
+      <div class="row tight" style="margin-bottom:4px">
+        <input type="number" class="rank-${s.id}" value="${r}" style="flex:1 1 70px"
+               placeholder="${T('rank')}">
+        <input type="number" step="any" class="pts-${s.id}" value="${v}"
+               style="flex:1 1 90px" placeholder="${T('points')}">
+      </div>`).join('') || `
+      <div class="row tight" style="margin-bottom:4px">
+        <input type="number" class="rank-${s.id}" style="flex:1 1 70px" placeholder="${T('rank')}">
+        <input type="number" step="any" class="pts-${s.id}" style="flex:1 1 90px"
+               placeholder="${T('points')}">
+      </div>`;
+    return `<div class="pick on" style="display:block">
+      <div class="row tight">
+        <div style="flex:1 1 130px"><label>${T('Date')}</label>
+          <input type="date" id="d-${s.id}" value="${s.date}"></div>
+        <div style="flex:1 1 110px"><label>${T('Edition')}</label>
+          <input id="e-${s.id}" value="${s.edition || ''}" placeholder="${T('Week 3')}"></div>
+      </div>
+      <div class="row tight" style="margin-top:8px">
+        <div style="flex:1 1 110px"><label>${T('Ranked teams')}</label>
+          <input type="number" id="c-${s.id}" value="${s.field_size || ''}"></div>
+        <div style="flex:1 1 90px"><label>${T('Games')}</label>
+          <input type="number" id="p-${s.id}" value="${s.max_games}"></div>
+      </div>
+      <label style="margin-top:10px">${T('Recorded thresholds')}</label>
+      ${lignes}
+      <div class="row tight" style="margin-top:10px">
+        <button class="small" onclick="enregistrerSaisie(${s.id})">${T('Save')}</button>
+        <button class="ghost small" onclick="openEntry(null)">${T('Cancel')}</button>
+        <span class="spacer"></span>
+        <button class="danger small" onclick="supprimerSaisie(${s.id})">${T('Delete')}</button>
+      </div>
+    </div>`;
+  }).join('') || `<p class="small muted">${T('No edition recorded for this category.')}</p>`;
+}
+
+function openEntry(id) { OUVERTE = id; renderEntries(); }
+
+function enregistrerSaisie(id, force) {
+  const ranks = [...document.querySelectorAll('.rank-' + id)].map(x => x.value);
+  const pts = [...document.querySelectorAll('.pts-' + id)].map(x => x.value);
+  const rows = {};
+  ranks.forEach((r, i) => { if (r && pts[i]) rows[r] = pts[i]; });
+  api('/api/history/entries/' + id, 'PUT', {
+    ...context(), force: !!force,
+    date: document.getElementById('d-' + id).value,
+    edition: document.getElementById('e-' + id).value,
+    field_size: document.getElementById('c-' + id).value,
+    max_games: document.getElementById('p-' + id).value,
+    thresholds: rows,
+  }).then(r => {
+    if (!r.ok && r.duplicate) {
+      if (confirm(r.error + '\n\n' + T('Save anyway?'))) enregistrerSaisie(id, true);
+      return;
+    }
+    if (!r.ok) return toast(r.error || T('Error'), true);
+    ENTRIES = r.items || []; OUVERTE = null; renderEntries();
+    toast(T('Edition corrected'));
+    if (LAST) estimate();
+  });
+}
+
+function supprimerSaisie(id) {
+  const s = ENTRIES.find(x => x.id === id);
+  if (!confirm(T('Delete the edition from') + ' ' + s.date + ' ?\n\n'
+             + T('It will no longer count in the estimates.'))) return;
+  api('/api/history/entries/' + id, 'DELETE', context()).then(r => {
+    ENTRIES = r.items || []; OUVERTE = null; renderEntries();
+    toast(T('Edition deleted'));
+    if (LAST) estimate();
+  });
+}
+
+function saveReal(force) {
+  const real = Number(document.getElementById('real').value);
+  if (!real) return toast(T('Enter the real threshold.'), true);
+  if (!Number(document.getElementById('field_size').value)) {
+    return toast(T('Fill in "Ranked teams": without it, the entry is useless.'), true);
+  }
+  const btn = document.getElementById('btn-save');
+  btn.disabled = true;
+  const data = payload();
+  api('/api/history/manual', 'POST', {
+    kind: data.kind, stage: data.stage, region: data.region, team_mode: data.team_mode,
+    game_mode: data.game_mode, max_games: data.max_games,
+    duration_min: data.duration_min, scoring: data.scoring,
+    // without a field size the entry is saved but invisible to the model —
+    // a rank means nothing without knowing how many teams it's out of
+    field_size: data.field_size, force: !!force,
+    rows: [{ date: document.getElementById('date').value,
+             label: document.getElementById('edition').value.trim(),
+             values: { [data.rank]: real }, max_games: data.max_games }],
+  }).then(r => {
+    btn.disabled = false;
+    if (!r.ok && r.duplicate) {
+      if (!confirm(r.error + '\n\n' + T('Save a second edition anyway?'))) return;
+      return saveReal(true);
+    }
+    if (!r.ok) return toast(r.error || T('Error'), true);
+    renderVerdict(r, real, data.rank);
+    document.getElementById('real').value = '';
+    toast(T('Edition recorded'));
+    chargerSaisies();
+  });
+}
+
+function renderVerdict(r, real, rank) {
+  const before = LAST && LAST.estimate ? LAST.estimate.value : null;
+  const after = (r.after.ranks || {})[rank];
+  const err = before ? Math.round(1000 * (before - real) / real) / 10 : null;
+  const color = err === null ? 'var(--muted)'
+              : Math.abs(err) <= 8 ? 'var(--ok)' : 'var(--warn)';
+  document.getElementById('verdict').innerHTML = `
+    <table class="small"><tbody>
+      <tr><td>${T('Estimated')}</td><td class="num">${before !== null ? fmtNum(before) : '—'}</td></tr>
+      <tr><td>${T('Real')}</td><td class="num"><b>${fmtNum(real)}</b></td></tr>
+      <tr><td>${T('Gap')}</td><td class="num" style="color:${color}">
+        ${err === null ? '—' : (err > 0 ? '+' : '') + err + ' %'}</td></tr>
+      <tr><td>${T('Next estimate')}</td><td class="num">${
+        after ? fmtNum(after.value) + ' <span class="muted">(' + fmtNum(after.low) + '–'
+                + fmtNum(after.high) + ')</span>' : '—'}</td></tr>
+      <tr><td>${T('Calibrated on')}</td><td class="num">${r.after.n_comps} ${T('tournament(s)')}</td></tr>
+    </tbody></table>`;
+
+  if (after) { LAST.estimate = after; renderEstimate(); }
+}
+
+['kind', 'stage'].forEach(id =>
+  document.getElementById(id).addEventListener('change', chargerSaisies));
+document.getElementById('region').addEventListener('change', chargerSaisies);
+attachScoringPaste('placement', 'placement-hint', 'kill');
+chargerSaisies();
+</script>
+{% endblock %}

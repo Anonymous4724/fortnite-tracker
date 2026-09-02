@@ -1,0 +1,277 @@
+{% extends "base.html" %}
+{% set active = 'dash' %}
+{% block title %}{{ comp.name }} — {{ _("Settings") }}{% endblock %}
+{% block content %}
+
+<div class="row tight" style="margin-bottom:10px">
+  <a href="/" class="muted small">&larr; {{ _("All tournaments") }}</a>
+</div>
+
+<h1 style="margin-bottom:4px">{{ comp.name }}</h1>
+<p class="muted small" style="margin-top:0">
+  {{ _("Check the parameters, then confirm to freeze the starting estimate.") }}
+</p>
+
+<div class="card">
+  <h2>{{ _("Tournament") }}</h2>
+  <div class="row">
+    <div style="flex:2 1 240px"><label>{{ _("Full name") }}</label>
+      <input id="name" value="{{ comp.name }}"></div>
+    <div style="flex:2 1 200px"><label>{{ _("Tournament") }} <span class="muted">— {{ _("what groups editions together") }}</span></label>
+      <input id="family" list="families" value="{{ comp.family }}" oninput="refreshSummary()">
+      <datalist id="families">
+        {% for f in families %}<option value="{{ f }}">{% endfor %}
+      </datalist></div>
+    <div style="flex:1 1 150px"><label>{{ _("Stage") }}</label>
+      <input id="stage" list="stages" value="{{ comp.stage }}" placeholder="{{ _('none') }}"
+             oninput="refreshSummary()">
+      <datalist id="stages">
+        {% for s in stages %}{% if s %}<option value="{{ s }}">{% endif %}{% endfor %}
+      </datalist></div>
+  </div>
+  <p class="small muted" style="margin:6px 0 0">
+    {{ _("Category") }} : <b id="category-echo"></b>
+  </p>
+  <div class="row" style="margin-top:12px">
+    <div><label>{{ _("Region") }}</label>
+      <select id="region">
+        {% for r in regions %}<option {{ 'selected' if r == comp.region }}>{{ r }}</option>{% endfor %}
+      </select></div>
+    <div><label>{{ _("Mode") }}</label>
+      <select id="team_mode">
+        {% for m in team_modes %}<option {{ 'selected' if m == comp.team_mode }}>{{ m }}</option>{% endfor %}
+      </select></div>
+    <div><label>{{ _("Type") }}</label>
+      <select id="game_mode">
+        {% for g in game_modes %}<option {{ 'selected' if g == comp.game_mode }}>{{ g }}</option>{% endfor %}
+      </select></div>
+  </div>
+  <div class="row" style="margin-top:12px">
+    <div><label>{{ _("Start") }}</label>
+      <input type="datetime-local" id="start_time"
+             value="{{ comp.start_time[:16] | replace(' ', 'T') }}"></div>
+    <div><label>{{ _("Official end") }}</label>
+      <input type="datetime-local" id="end_time"
+             value="{{ (comp.end_time[:16] | replace(' ', 'T')) if comp.end_time else '' }}"></div>
+    <div><label>{{ _("Game length") }}</label>
+      <input type="number" step="any" id="game_minutes" value="{{ comp.game_minutes }}"></div>
+    <div><label>{{ _("Tracker lag") }}</label>
+      <input type="number" step="any" id="tracker_lag_min" value="{{ comp.tracker_lag_min }}"></div>
+  </div>
+  <div class="row" style="margin-top:12px;align-items:flex-end">
+    <div><label>{{ _("Games") }}</label>
+      <input type="number" id="max_games" value="{{ comp.max_games }}"></div>
+    <div><label>{{ _("Expected teams") }}</label>
+      <input type="number" id="field_size" value="{{ comp.field_size }}"
+             placeholder="{{ _('field size') }}"></div>
+    <div><label>{{ _("Counting") }}</label>
+      <select id="games_mode">
+        <option value="max" {{ 'selected' if comp.games_mode != 'sealed' }}>{{ _("Maximum") }}</option>
+        <option value="sealed" {{ 'selected' if comp.games_mode == 'sealed' }}>{{ _("Sealed") }}</option>
+      </select></div>
+    <label class="check" style="flex:1 1 200px">
+      <input type="checkbox" id="qualifier" {{ 'checked' if comp.qualifier }}>
+      {{ _("Qualifying round") }}
+    </label>
+    <span class="small muted">{{ _("Collection ends") }} : <b id="end-calc">—</b></span>
+  </div>
+</div>
+
+<div class="card">
+  <h2>{{ _("Scoring") }}</h2>
+  <p class="small {{ 'muted' if comp.scoring_known else '' }}"
+     style="margin-top:-8px{{ '' if comp.scoring_known else ';color:var(--warn)' }}">
+    {% if comp.scoring_known %}
+      {{ _("Deduced from") }} {{ stats.total or 0 }} {{ _("real matches") }}{% if comp.scoring_accuracy %} —
+      {{ _("reproduces") }} {{ comp.scoring_accuracy }} % {{ _("of the scores") }}{% endif %}.
+    {% else %}
+      {{ _("Not deduced: generic scoring, check it.") }}
+    {% endif %}
+  </p>
+  <div class="row" style="align-items:flex-start">
+    <div style="flex:1 1 200px">
+      <label>{{ _("Saved scoring") }}</label>
+      <select id="scoring_id" onchange="applyScoring()">
+        <option value="">— {{ _("the tournament's") }} —</option>
+        {% for s in scorings %}<option value="{{ s.id }}">{{ s.name }}</option>{% endfor %}
+      </select>
+      <label style="margin-top:12px">{{ _("Points per elimination") }}</label>
+      <input type="number" step="any" id="kill" value="{{ comp.scoring.kill }}">
+      <label style="margin-top:12px">{{ _("Elimination cap per game") }}</label>
+      <input type="number" min="0" id="kill_cap" placeholder="{{ _('none') }}"
+             value="{{ comp.scoring.kill_cap or '' }}">
+    </div>
+    <div style="flex:1 1 240px">
+      <label>{{ _("Placement points") }}</label>
+      <textarea id="placement" rows="10" class="mono" style="resize:vertical"></textarea>
+      <div id="placement-hint" class="small muted" style="margin-top:6px"></div>
+    </div>
+    <div style="flex:1 1 160px">
+      <label>{{ _("Best a single game can score") }}</label>
+      <div class="pred"><div class="val" id="best">—</div>
+        <div class="range" id="best-detail"></div></div>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <h2>{{ _("Thresholds") }} · <span id="region-label">{{ comp.region }}</span></h2>
+  <div id="objectives"></div>
+  <div class="row tight" style="margin-top:10px">
+    <button class="ghost small" onclick="addObjective()">+ {{ _("Threshold") }}</button>
+  </div>
+</div>
+
+<div class="card" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+  <button onclick="confirmAll()" id="btn-ok">
+    {{ _("Save and review the estimate") if comp.confirmed else _("Confirm and start") }}
+  </button>
+  <a href="/" class="ghost" style="text-decoration:none">{{ _("Cancel") }}</a>
+  <span class="spacer"></span>
+  <span class="small muted">{{ depth }} {{ _("Ranked teams") }} · {{ stats.total or 0 }} {{ _("matches read") }}</span>
+</div>
+
+<div class="card hidden" id="result">
+  <h2>{{ _("Starting estimate") }}</h2>
+  <div id="result-body"></div>
+  <div class="row tight" style="margin-top:14px">
+    <a class="btn" href="/tracking/{{ comp.id }}">{{ _("Open tracking") }}</a>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+const COMP = {{ comp | tojson }};
+const SCORINGS = {{ scorings | tojson }};
+let OBJECTIVES = {{ objectives | tojson }};
+
+document.getElementById('placement').value = scoringToText(COMP.scoring);
+
+function renderObjectives() {
+  if (!OBJECTIVES.length) OBJECTIVES = [{ label: '', rank: '' }];
+  document.getElementById('objectives').innerHTML = OBJECTIVES.map((o, i) => `
+    <div class="row tight" style="margin-bottom:6px">
+      <input value="${(o.label || '').replace(/"/g, '&quot;')}" placeholder="${T('Threshold')}"
+             oninput="OBJECTIVES[${i}].label=this.value" style="flex:2 1 140px">
+      <input type="number" value="${o.rank || ''}" placeholder="${T('Rank')}"
+             oninput="OBJECTIVES[${i}].rank=+this.value" style="flex:1 1 90px">
+      <button class="danger small"
+              onclick="OBJECTIVES.splice(${i},1);renderObjectives()">×</button>
+    </div>`).join('');
+}
+
+function addObjective() { OBJECTIVES.push({ label: '', rank: '' }); renderObjectives(); }
+
+function applyScoring() {
+  const s = SCORINGS.find(x => x.id === Number(document.getElementById('scoring_id').value));
+  if (!s) return;
+  document.getElementById('kill').value = s.kill;
+  document.getElementById('kill_cap').value = s.kill_cap || '';
+  document.getElementById('placement').value = scoringToText(s);
+  refreshSummary();
+}
+
+function currentScoring() {
+  const s = textToScoring(document.getElementById('placement').value,
+                          document.getElementById('kill').value);
+  s.kill_cap = Number(document.getElementById('kill_cap').value) || null;
+  return s;
+}
+
+function refreshSummary() {
+  const s = currentScoring();
+  const best = s.placement.reduce((a, p) => Math.max(a, p[2]), 0);
+  const cap = s.kill_cap;
+  const box = document.getElementById('best');
+  if (!s.placement.length) { box.textContent = '—'; return; }
+  box.textContent = fmtNum(best + (cap || 8) * s.kill);
+  document.getElementById('best-detail').textContent =
+    cap ? `${T('win')} + ${cap} ${T('elims')} (${T('cap')})` : `${T('win')} + 8 ${T('elims')}`;
+
+  const start = document.getElementById('start_time').value;
+  const end = document.getElementById('end_time').value;
+  const g = Number(document.getElementById('game_minutes').value) || 0;
+  const lag = Number(document.getElementById('tracker_lag_min').value) || 0;
+  document.getElementById('end-calc').textContent = end
+    ? new Date(new Date(end).getTime() + (g + lag) * 60000)
+        .toTimeString().slice(0, 5)
+    : '—';
+  document.getElementById('region-label').textContent =
+    document.getElementById('region').value;
+  const fam = document.getElementById('family').value.trim() || '—';
+  const stage = document.getElementById('stage').value.trim();
+  document.getElementById('category-echo').textContent =
+    (stage ? fam + ' · ' + stage : fam) + ' · ' + document.getElementById('region').value;
+}
+
+function confirmAll() {
+  const btn = document.getElementById('btn-ok');
+  const scoring = currentScoring();
+  if (!scoring.placement.length) return toast(T('The placement scoring is empty.'), true);
+  const items = OBJECTIVES.filter(o => o.rank);
+  if (!items.length) return toast(T('Name at least one threshold to track.'), true);
+  btn.disabled = true;
+  api('/api/competitions/' + COMP.id + '/confirm', 'POST', {
+    name: document.getElementById('name').value,
+    family: document.getElementById('family').value.trim(),
+    stage: document.getElementById('stage').value.trim(),
+    region: document.getElementById('region').value,
+    team_mode: document.getElementById('team_mode').value,
+    game_mode: document.getElementById('game_mode').value,
+    start_time: document.getElementById('start_time').value.replace('T', ' '),
+    end_time: document.getElementById('end_time').value.replace('T', ' ') || null,
+    game_minutes: document.getElementById('game_minutes').value,
+    tracker_lag_min: document.getElementById('tracker_lag_min').value,
+    max_games: document.getElementById('max_games').value,
+    field_size: document.getElementById('field_size').value,
+    games_mode: document.getElementById('games_mode').value,
+    qualifier: document.getElementById('qualifier').checked,
+    scoring, objectives: items,
+  }).then(r => {
+    btn.disabled = false;
+    if (!r.ok) return toast(r.error || T('Error'), true);
+    showEstimate(r.first_estimate, items);
+  });
+}
+
+function showEstimate(est, items) {
+  const box = document.getElementById('result');
+  box.classList.remove('hidden');
+  const body = document.getElementById('result-body');
+  if (!est || !est.ranks || !Object.keys(est.ranks).length) {
+    body.innerHTML = `<p class="small muted">${T('No finished tournament in this category yet: this one will serve as the first reference.')}</p>`;
+    box.scrollIntoView({ behavior: 'smooth' });
+    return;
+  }
+  const SRC = { category: T('editions from the same category'), family: T('same tournament, other regions'),
+                mode: T('same game type'), scoring: T('Scoring') + ', ' + T('measured ratio'),
+                'scoring (prior)': T('scoring only') + ' — ' + T('ratio not measured'),
+                'scoring (thin sample)': T('scoring only') };
+  const rows = items.map(o => {
+    const g = est.ranks[o.rank];
+    if (!g) return '';
+    return `<tr><td><b>${o.label || T('Threshold')}</b> · top ${o.rank}</td>
+      <td class="num small muted">${g.share ? g.share + ' %' : '—'}</td>
+      <td class="num"><b>${fmtNum(g.value)}</b></td>
+      <td class="num small muted">${fmtNum(g.low)} – ${fmtNum(g.high)}</td>
+      <td class="num small muted">${SRC[g.source] || g.source || '—'}</td></tr>`;
+  }).join('');
+  body.innerHTML = `
+    <table><thead><tr><th>${T('Threshold')}</th><th class="num">${T('of field')}</th>
+      <th class="num">${T('Estimated')}</th><th class="num">${T('Range')}</th>
+      <th class="num">${T('Scale taken from')}</th></tr></thead><tbody>${rows}</tbody></table>
+    <p class="small muted" style="margin-top:8px">
+      ${est.n_comps} ${T('tournament(s)')} de ${(est.scope || '').replace('⚠ ', '')}.</p>`;
+  box.scrollIntoView({ behavior: 'smooth' });
+}
+
+['start_time', 'end_time', 'game_minutes', 'tracker_lag_min', 'kill', 'kill_cap', 'region']
+  .forEach(id => document.getElementById(id).addEventListener('input', refreshSummary));
+attachScoringPaste('placement', 'placement-hint', 'kill');
+document.getElementById('placement').addEventListener('input', refreshSummary);
+renderObjectives();
+refreshSummary();
+</script>
+{% endblock %}

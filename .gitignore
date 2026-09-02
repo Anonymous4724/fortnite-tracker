@@ -1,0 +1,33 @@
+# API credentials — never commit these. The patterns are deliberately wide:
+# key files have been called several things over the life of this project.
+*key*.txt
+*cle_*.txt
+.env
+
+# Local data: the tracking database, archived tournaments, API dumps.
+# The app rebuilds an empty database on first start.
+data/
+!data/.gitkeep
+
+# Analysis output
+analysis/figures/*.png
+analysis/figures/*.svg
+!analysis/figures/.gitkeep
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# Editors and operating systems
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Backups
+*.zip
+*.bak

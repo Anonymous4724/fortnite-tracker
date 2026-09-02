@@ -1,0 +1,168 @@
+{% extends "base.html" %}
+{% set active = 'series' %}
+{% block title %}{{ _("Series") }} — Fortnite Comp Tracker{% endblock %}
+{% block content %}
+
+<div class="grid side">
+  <div>
+    <h1>{{ _("Series") }}</h1>
+    <p class="muted small">
+      {{ _("Make a series") }} <b>{{ _("by region") }}</b>{{ _(": EU and NAC thresholds have nothing in common, so each one's history stays clean for predictions.") }}
+    </p>
+
+    {% if not series %}
+      <div class="card empty">{{ _("No series yet. Create the first one on the right") }} &rarr;</div>
+    {% endif %}
+
+    {% for s in series %}
+    <div class="card" style="padding:14px 16px">
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <a href="/series/{{ s.id }}" style="font-weight:600;font-size:16px">{{ s.name }}</a>
+        <span class="tag accent">{{ s.region }}</span>
+        <span class="tag">{{ s.team_mode }}</span>
+        <span class="tag">{{ s.game_mode }}</span>
+        <span class="spacer"></span>
+        <span class="tag">{{ s.n_editions }} {{ _("Edition") }}{{ 's' if s.n_editions > 1 }}</span>
+      </div>
+      <div class="small muted" style="margin-top:8px">
+        {% for st in s.stages %}
+          <b>{{ st.name }}</b> · {{ _("D+") }}{{ st.day_offset }} {{ st.start }} ·
+          {{ st.max_games }} {{ _("Games") }} {{ _("sealed") if st.games_mode == 'sealed' else _("max") }} ·
+          tops {{ st.ranks|join(', ') }}{{ '  —  ' if not loop.last }}
+        {% endfor %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+
+  <div class="card">
+    <h2>{{ _("New series") }}</h2>
+    <form onsubmit="return createSeries(event)">
+      <div style="margin-bottom:12px">
+        <label>{{ _("Name") }}</label>
+        <input name="name" required placeholder="{{ _("e.g.") }} FNCS Duo EU">
+      </div>
+      <div class="row" style="margin-bottom:12px">
+        <div><label>{{ _("Region") }}</label>
+          <select name="region">
+            {% for r in regions %}<option {{ 'selected' if r == 'EU' }}>{{ r }}</option>{% endfor %}
+          </select>
+        </div>
+        <div><label>{{ _("Mode") }}</label>
+          <select name="team_mode">
+            {% for m in team_modes %}<option {{ 'selected' if m == 'Duo' }}>{{ m }}</option>{% endfor %}
+          </select>
+        </div>
+      </div>
+      <div class="row" style="margin-bottom:12px">
+        <div><label>{{ _("Match type") }}</label>
+          <select name="game_mode">
+            {% for g in game_modes %}<option>{{ g }}</option>{% endfor %}
+          </select>
+        </div>
+        <div><label>{{ _("Scoring system") }}</label>
+          <select name="scoring_id">
+            <option value="">— {{ _("none") }} —</option>
+            {% for s in scorings %}<option value="{{ s.id }}">{{ s.name }}</option>{% endfor %}
+          </select>
+        </div>
+      </div>
+
+      <h3 style="margin-top:18px">{{ _("Stages") }}</h3>
+      <div id="stages"></div>
+      <button type="button" class="ghost small" onclick="addStage()">+ {{ _("Add a stage") }}</button>
+
+      <div style="margin-top:18px">
+        <button type="submit">{{ _("Create the series") }}</button>
+      </div>
+    </form>
+    <p class="small muted" style="margin-top:12px">
+      « {{ _("D+") }}0 » {{ _("is the day of the first stage. A final held the next day is") }} {{ _("D+") }}1.
+    </p>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+let STAGES = {{ default_stages | tojson }};
+
+function stageCard(st, i) {
+  return `<div class="card" style="padding:12px;margin-bottom:10px;background:var(--panel-2)">
+    <div class="row" style="margin-bottom:8px">
+      <div style="flex:2 1 130px"><label>${T('Name')}</label>
+        <input value="${st.name}" oninput="setStage(${i}, 'name', this.value)"></div>
+      <div style="flex:1 1 60px"><label>${T('Day')}</label>
+        <input type="number" value="${st.day_offset}" oninput="setStage(${i}, 'day_offset', this.value)"></div>
+      <div style="flex:1 1 80px"><label>${T('Time')}</label>
+        <input type="time" value="${st.start}" oninput="setStage(${i}, 'start', this.value)"></div>
+    </div>
+    <div class="row" style="margin-bottom:8px">
+      <div><label>${T('Duration (min)')}</label>
+        <input type="number" value="${st.duration_min}" oninput="setStage(${i}, 'duration_min', this.value)"></div>
+      <div><label>${T('Game')} (min)</label>
+        <input type="number" value="${st.game_minutes}" oninput="setStage(${i}, 'game_minutes', this.value)"></div>
+      <div><label>${T('Games')}</label>
+        <input type="number" value="${st.max_games}" oninput="setStage(${i}, 'max_games', this.value)"></div>
+      <div style="flex:2 1 170px"><label>${T('Counting mode')}</label>
+        <select onchange="setStage(${i}, 'games_mode', this.value); renderStages()">
+          <option value="max" ${st.games_mode !== 'sealed' ? 'selected' : ''}>${T('Maximum')}</option>
+          <option value="sealed" ${st.games_mode === 'sealed' ? 'selected' : ''}>${T('Sealed')}</option>
+        </select></div>
+      ${st.games_mode === 'sealed' ? `<div><label>${T('Interval')} (min)</label>
+        <input type="number" value="${st.slot_minutes || 35}" oninput="setStage(${i}, 'slot_minutes', this.value)"></div>` : ''}
+    </div>
+    <div class="row">
+      <div style="flex:3 1 200px"><label>${T('Tracked ranks')}</label>
+        <input value="${st.ranks.join(', ')}" oninput="setStage(${i}, 'ranks', this.value)"></div>
+      <div style="flex:0 0 auto;display:flex;align-items:flex-end">
+        <button type="button" class="danger small" onclick="removeStage(${i})">${T('Remove')}</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+function renderStages() {
+  document.getElementById('stages').innerHTML = STAGES.map(stageCard).join('');
+}
+
+function setStage(i, key, value) {
+  if (key === 'ranks') {
+    STAGES[i].ranks = value.split(/[,;]/).map(v => parseInt(v, 10)).filter(v => v > 0);
+  } else if (key === 'name' || key === 'start' || key === 'games_mode') {
+    STAGES[i][key] = value;
+  } else {
+    STAGES[i][key] = parseFloat(value) || 0;
+  }
+}
+
+function addStage() {
+  const last = STAGES[STAGES.length - 1] || {};
+  STAGES.push({ name: T('Final'), day_offset: (last.day_offset || 0) + 1, start: last.start || '19:00',
+                duration_min: last.duration_min || 180, ranks: [1, 3, 5, 10, 20],
+                max_games: 6, game_minutes: last.game_minutes || 30,
+                tracker_lag_min: 5, games_mode: 'sealed', slot_minutes: 35 });
+  renderStages();
+}
+
+function removeStage(i) {
+  if (STAGES.length <= 1) return toast(T('You need at least one stage.'), true);
+  STAGES.splice(i, 1);
+  renderStages();
+}
+
+function createSeries(ev) {
+  ev.preventDefault();
+  const data = Object.fromEntries(new FormData(ev.target).entries());
+  data.stages = STAGES;
+  api('/api/series', 'POST', data).then(r => {
+    if (!r.ok) return toast(r.error || T('Error'), true);
+    location.href = '/series/' + r.id;
+  });
+  return false;
+}
+
+renderStages();
+</script>
+{% endblock %}

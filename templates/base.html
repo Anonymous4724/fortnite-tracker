@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="{{ lang }}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Fortnite Comp Tracker{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#127942;</text></svg>">
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="/">FORTNITE <span>COMP TRACKER</span>
+    <span class="tag" style="margin-left:8px">v{{ app_version }}</span>
+  </a>
+  <nav>
+    <a href="/" class="{{ 'active' if active == 'dash' }}">{{ _("Tournaments") }}</a>
+    <a href="/history" class="{{ 'active' if active == 'hist' }}">{{ _("History") }}</a>
+    <a href="/train" class="{{ 'active' if active == 'train' }}">{{ _("Train") }}</a>
+    <a href="/scoring" class="{{ 'active' if active == 'scoring' }}">{{ _("Scoring") }}</a>
+    <a href="/manual" class="{{ 'active' if active == 'comps' }}">{{ _("Manual entry") }}</a>
+  </nav>
+  <div class="langues" title="{{ _('Language') }}">
+    {% for code, label in languages.items() %}
+      <a href="/language/{{ code }}" class="{{ 'on' if code == lang }}">{{ code|upper }}</a>
+    {% endfor %}
+  </div>
+  {% if quota %}
+  <a class="quota" href="/" title="{{ _('API requests used this month') }}">
+    <div class="quota-bar"><span style="width:{{ [quota.pct, 100]|min }}%"></span></div>
+    <div class="quota-text">
+      <b>{{ quota.used }}</b>/{{ quota.limit }} {{ _("requests") }}
+      <span class="muted">· {{ quota.tournaments_left }}/{{ quota.tournaments_total }}
+        {{ _("tournaments left") }}</span>
+    </div>
+  </a>
+  {% endif %}
+</header>
+<main{% if wide %} class="wide"{% endif %}>
+  {% block content %}{% endblock %}
+</main>
+<script>
+  // Strings the client-side code builds on its own, in the reader's language.
+  const STRINGS = {{ strings | tojson }};
+  const T = text => STRINGS[text] || text;
+</script>
+<script src="{{ url_for('static', filename='chart.js') }}"></script>
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+{% block scripts %}{% endblock %}
+</body>
+</html>

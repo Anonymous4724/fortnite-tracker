@@ -1,0 +1,244 @@
+{% extends "base.html" %}
+{% set active = 'scoring' %}
+{% set wide = true %}
+{% block title %}{{ _("Scoring") }} — Fortnite Comp Tracker{% endblock %}
+{% block content %}
+
+<h1>{{ _("Scoring systems") }}</h1>
+
+<div class="card">
+  <div class="row tight" style="align-items:flex-end">
+    <div style="flex:2 1 220px">
+      <label>{{ _("New scoring name") }}</label>
+      <input id="new-name" placeholder="FNCS Division 1"
+             onkeydown="if(event.key==='Enter')newScoring()">
+    </div>
+    <div style="flex:1 1 220px">
+      <label>{{ _("Start from") }}</label>
+      <select id="new-preset"></select>
+    </div>
+    <button onclick="newScoring()">{{ _("Create") }}</button>
+  </div>
+</div>
+
+<div class="panes" style="grid-template-columns:minmax(240px,320px) minmax(420px,1fr)">
+
+  <div class="pane">
+    <h2>{{ _("My scoring systems") }} <span class="tag" id="count"></span></h2>
+    <div id="list"></div>
+  </div>
+
+  <div class="pane" id="editor">
+    <h2>{{ _("Pick a scoring system") }}</h2>
+    <p class="small muted">{{ _("Click a scoring on the left to edit it.") }}</p>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+let SCORINGS = {{ scorings | tojson }};
+const PRESETS = {{ presets | tojson }};
+let CURRENT = SCORINGS.length ? SCORINGS[0].id : null;
+
+function format(s) {
+  const parts = [s.team_mode, s.game_mode].filter(Boolean);
+  return parts.length ? parts.join(' · ') : T('all formats');
+}
+
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"]/g, ch =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
+}
+
+/* ---------------- the list ---------------- */
+function renderList() {
+  document.getElementById('count').textContent = SCORINGS.length;
+  document.getElementById('list').innerHTML = SCORINGS.map(s => `
+    <div class="pick ${s.id === CURRENT ? 'on' : ''}" onclick="select(${s.id})">
+      <div>
+        <b>${esc(s.name)}</b>
+        <div class="small muted">${format(s)} · ${s.kill} ${T('pt/elim')}${
+          s.kill_cap ? ' · ' + T('cap') + ' ' + s.kill_cap : ''} · ${
+          (s.placement || []).length} ${T('tier(s)')}</div>
+      </div>
+      <button class="danger small" onclick="event.stopPropagation();deleteScoring(${s.id})">×</button>
+    </div>`).join('')
+    || `<p class="small muted">${T('No scoring yet. Create one above.')}</p>`;
+}
+
+function select(id) {
+  CURRENT = id;
+  renderList();
+  renderEditor();
+}
+
+/* ---------------- the editor ---------------- */
+function renderEditor() {
+  const box = document.getElementById('editor');
+  const s = SCORINGS.find(x => x.id === CURRENT);
+  if (!s) {
+    box.innerHTML = `<h2>${T('Pick a scoring system')}</h2>
+      <p class="small muted">${T('Click a scoring on the left to edit it.')}</p>`;
+    return;
+  }
+  box.innerHTML = `
+    <h2>${esc(s.name)} <span class="tag">${format(s)}</span></h2>
+    <p class="small muted" style="margin:-6px 0 10px">
+      ${T("The format is used to suggest the right scoring and warn about mismatches — a Duo scoring applied to a Solo cup throws off the predictions, since the lobbies aren't the same size.")}</p>
+    <div class="row" style="align-items:flex-start">
+      <div style="flex:1 1 200px">
+        <label>${T('Name')}</label>
+        <input id="f-name" value="${esc(s.name)}">
+        <label style="margin-top:12px">${T('Points per elimination')}</label>
+        <input type="number" step="any" id="f-kill" value="${s.kill}">
+        <label style="margin-top:12px">${T('Eliminations cap')}
+          <span class="muted">— ${T('empty if none')}</span></label>
+        <input type="number" min="0" id="f-cap" placeholder="${T('none')}" value="${s.kill_cap || ''}">
+        <label style="margin-top:12px">${T('Mode')}</label>
+        <select id="f-team">
+          <option value="">— ${T('all')} —</option>
+          {% for m in team_modes %}<option value="{{ m }}">{{ m }}</option>{% endfor %}
+        </select>
+        <label style="margin-top:12px">${T('Game type')}</label>
+        <select id="f-game">
+          <option value="">— ${T('all')} —</option>
+          {% for g in game_modes %}<option value="{{ g }}">{{ g }}</option>{% endfor %}
+        </select>
+        <label style="margin-top:12px">${T('Note')}</label>
+        <input id="f-notes" value="${esc(s.notes || '')}">
+      </div>
+      <div style="flex:1 1 240px">
+        <label>${T('Placement points')} <span class="muted">— ${T('paste your table here')}</span></label>
+        <textarea id="f-place" rows="14" class="mono" style="resize:vertical"
+                  placeholder="1st&#9;65 (+9)&#9;32">${esc(scoringToText(s))}</textarea>
+        <div id="f-hint" class="small muted" style="margin-top:6px"></div>
+      </div>
+      <div style="flex:1 1 170px">
+        <label>${T('Preview')}</label>
+        <div id="f-preview"></div>
+      </div>
+    </div>
+    <div class="row tight" style="margin-top:16px">
+      <button onclick="save()">${T('Save')}</button>
+      <button class="ghost" onclick="duplicate()">${T('Duplicate')}</button>
+      <span class="spacer"></span>
+      <button class="danger ghost" onclick="deleteScoring(${s.id})">${T('Delete')}</button>
+    </div>`;
+  document.getElementById('f-team').value = s.team_mode || '';
+  document.getElementById('f-game').value = s.game_mode || '';
+  document.getElementById('f-preview').innerHTML = preview(s);
+  attachScoringPaste('f-place', 'f-hint', 'f-kill');
+}
+
+function preview(s) {
+  const rows = [1, 5, 10, 20, 50].map(r => {
+    const row = (s.placement || []).find(p => p[0] <= r && r <= p[1]);
+    return row ? `<tr><td>Top ${r}</td><td class="num">${row[2]}</td></tr>` : '';
+  }).join('');
+  const best = (s.placement || []).reduce((a, p) => Math.max(a, p[2]), 0);
+  const cap = s.kill_cap || 0;
+  const payes = k => (cap ? Math.min(k, cap) : k);
+  return `<table class="small"><tbody>${rows}
+    <tr><td>${T('Win + 5 elims')}</td><td class="num">${best + payes(5) * (s.kill || 0)}</td></tr>
+    ${cap ? `<tr><td>${T('Best possible game')}</td>
+      <td class="num"><b>${best + cap * (s.kill || 0)}</b></td></tr>` : ''}
+    </tbody></table>`;
+}
+
+/* ---------------- creation ---------------- */
+function renderPresets() {
+  const select = document.getElementById('new-preset');
+  const garde = select.value;
+  const modeles = Object.keys(PRESETS).map(n =>
+    `<option value="modele:${esc(n)}">${esc(n)}</option>`).join('');
+  const copies = SCORINGS.map(s =>
+    `<option value="copie:${s.id}">${esc(s.name)}</option>`).join('');
+  select.innerHTML = `<option value="">— ${T('empty table')} —</option>`
+    + `<optgroup label="${T('Built-in templates')}">${modeles}</optgroup>`
+    + (copies ? `<optgroup label="${T('Copy one of mine')}">${copies}</optgroup>` : '');
+  if ([...select.options].some(o => o.value === garde)) select.value = garde;
+}
+
+function newScoring() {
+  const name = (document.getElementById('new-name').value || '').trim();
+  if (!name) return toast(T('Give the scoring a name.'), true);
+  const depart = document.getElementById('new-preset').value;
+
+  if (depart.startsWith('copie:')) {
+    const src = SCORINGS.find(s => s.id === Number(depart.slice(6)));
+    if (!src) { renderPresets(); return toast(T('This scoring no longer exists.'), true); }
+    return creer({ name, kill: src.kill, kill_cap: src.kill_cap,
+                   team_mode: src.team_mode, game_mode: src.game_mode,
+                   placement: src.placement });
+  }
+  const modele = depart.startsWith('modele:') ? PRESETS[depart.slice(7)] : null;
+  creer(modele
+    ? { name, kill: modele.kill, kill_cap: modele.kill_cap || null, placement: modele.placement }
+    : { name, kill: 2, placement: [[1, 1, 60]] });
+}
+
+function creer(payload) {
+  api('/api/scorings', 'POST', payload).then(r => {
+    if (!r.ok) return toast(r.error || T('Error'), true);
+    SCORINGS = [r.scoring].concat(SCORINGS);
+    document.getElementById('new-name').value = '';
+    CURRENT = r.scoring.id;
+    renderAll();
+    toast('« ' + r.scoring.name + ' » ' + T('created'));
+    document.getElementById('f-place').focus();
+  });
+}
+
+/* ---------------- actions ---------------- */
+function collect() {
+  return {
+    name: document.getElementById('f-name').value,
+    kill: document.getElementById('f-kill').value,
+    kill_cap: document.getElementById('f-cap').value,
+    team_mode: document.getElementById('f-team').value,
+    game_mode: document.getElementById('f-game').value,
+    placement: textToPlacement(document.getElementById('f-place').value),
+    notes: document.getElementById('f-notes').value,
+  };
+}
+
+function save() {
+  const data = collect();
+  if (!data.placement.length) return toast(T('No readable tier — one line per tier.'), true);
+  api('/api/scorings/' + CURRENT, 'PUT', data).then(r => {
+    if (!r.ok) return toast(r.error || T('Error'), true);
+    SCORINGS = SCORINGS.map(s => s.id === CURRENT ? r.scoring : s);
+    renderAll();
+    toast(T('Scoring saved'));
+  });
+}
+
+function duplicate() {
+  api('/api/scorings/' + CURRENT + '/duplicate', 'POST', {}).then(r => {
+    if (!r.ok) return toast(r.error || T('Error'), true);
+    SCORINGS = SCORINGS.concat([r.scoring]).sort((a, b) => a.name.localeCompare(b.name));
+    CURRENT = r.scoring.id;
+    renderAll();
+    toast(T('Copy created'));
+  });
+}
+
+function deleteScoring(id) {
+  const s = SCORINGS.find(x => x.id === id);
+  if (!s) return;
+  if (!confirm(T('Delete') + ' « ' + s.name + ' » ?\n\n'
+             + T("Tournaments using it keep their own copy — they won't change."))) return;
+  api('/api/scorings/' + id, 'DELETE').then(() => {
+    SCORINGS = SCORINGS.filter(x => x.id !== id);
+    if (CURRENT === id) CURRENT = SCORINGS.length ? SCORINGS[0].id : null;
+    renderAll();
+    toast('« ' + s.name + ' » ' + T('deleted'));
+  });
+}
+
+function renderAll() { renderList(); renderEditor(); renderPresets(); }
+renderAll();
+</script>
+{% endblock %}

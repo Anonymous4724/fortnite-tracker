@@ -1,0 +1,9 @@
+# Dependencies for analysis/ only. The app itself is standard library and stays
+# that way — nothing in this file is ever imported by app.py, predict.py,
+# calibration.py or db.py.
+#
+# Capped at the next major version; the comment is what each was last run on.
+numpy>=1.26,<3          # 2.4.4
+pandas>=2.0,<4          # 3.0.2
+scipy>=1.11,<2          # 1.17.1
+matplotlib>=3.8,<4      # 3.10.9

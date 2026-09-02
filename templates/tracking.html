@@ -1,0 +1,572 @@
+{% extends "base.html" %}
+{% set active = 'dash' %}
+{% set wide = true %}
+{% block title %}{{ comp.name }} — {{ _("Tracking") }}{% endblock %}
+{% block content %}
+
+<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:8px">
+  <a href="/" class="muted small">&larr; {{ _("All tournaments") }}</a>
+  <span class="spacer"></span>
+  <span class="countdown" id="countdown">{{ _("Next refresh in") }} …</span>
+  <button class="ghost small" onclick="refreshNow()" id="btn-refresh">{{ _("Refresh now (1 request)") }}</button>
+</div>
+
+<h1 style="margin-bottom:6px">{{ comp.name }}</h1>
+<div style="margin-bottom:14px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+  <span class="tag accent">{{ comp.region }}</span>
+  <span class="tag">{{ comp.team_mode }}</span>
+  <span class="tag">{{ comp.game_mode }}</span>
+  {% if comp.qualifier %}<span class="tag accent">{{ _("Qualifier") }}</span>{% endif %}
+  <span class="tag">{{ comp.start_time[11:16] }} → {{ comp.effective_end[11:16] if comp.effective_end else '—' }}</span>
+  <span class="tag">{{ comp.max_games }} {{ _("Games") }} {{ _("sealed") if comp.sealed else _("max") }}</span>
+  <span class="tag">{{ comp.scoring.kill }} {{ _("pt/elim") }}{% if comp.scoring.kill_cap %} · {{ _("cap") }} {{ comp.scoring.kill_cap }}{% endif %}</span>
+  <span id="tag-live" class="tag {{ 'done' if comp.finished else 'live' }}">
+    {% if comp.finished %}{{ _("finished") }}{% else %}<span class="dot"></span>{{ _("live") }}{% endif %}</span>
+  <span class="spacer"></span>
+  <button class="ghost small" onclick="toggleDetails()" id="btn-details">{{ _("Details") }}</button>
+  <a class="btn ghost small" href="/prepare/{{ comp.id }}">{{ _("Settings") }}</a>
+  <button class="small" onclick="finishNow()" id="btn-finish">{{ _("Tournament finished") }}</button>
+</div>
+
+<div class="card hidden" id="details">
+  <div class="row" style="align-items:flex-start">
+    <div style="flex:1 1 220px">
+      <h3 style="margin-top:0">{{ _("Format") }}</h3>
+      <div class="kv"><span>{{ _("Start") }}</span><b>{{ comp.start_time[11:16] }}</b></div>
+      <div class="kv"><span>{{ _("Official end") }}</span><b>{{ comp.end_time[11:16] if comp.end_time else '—' }}</b></div>
+      <div class="kv"><span>{{ _("Collection ends") }}</span>
+        <b>{{ comp.effective_end[11:16] if comp.effective_end else '—' }}</b></div>
+      {% if comp.sealed %}
+      <div class="kv"><span>{{ _("Interval") }}</span><b>{{ comp.slot_minutes|round(0)|int }} min</b></div>
+      {% endif %}
+      <div class="kv"><span>{{ _("Games played") }}</span><b id="kv-played">—</b></div>
+      <div class="kv"><span>{{ _("Ranked") }}</span><b id="kv-depth">{{ depth }}</b></div>
+      <div class="kv"><span>{{ _("Matches recorded") }}</span><b id="kv-matches">—</b></div>
+    </div>
+    <div style="flex:1 1 220px">
+      <h3 style="margin-top:0" id="scoring-title">{{ _("Scoring") }}</h3>
+      <div id="scoring"></div>
+    </div>
+    <div style="flex:1 1 200px">
+      <h3 style="margin-top:0">{{ _("Thresholds") }} · {{ comp.region }}</h3>
+      <div id="objectives"></div>
+      <div class="row tight" style="margin-top:10px">
+        <button class="small" onclick="saveObjectives()">{{ _("Save") }}</button>
+        <button class="ghost small" onclick="addObjective()">+ {{ _("Threshold") }}</button>
+      </div>
+    </div>
+    {% if comp.sealed %}
+    <div style="flex:1 1 180px">
+      <h3 style="margin-top:0">{{ _("Schedule") }}</h3>
+      <table class="small"><tbody>
+        {% for g in comp.schedule %}
+        <tr><td>{{ _("Game") }} {{ g.index }}</td>
+            <td class="num">{{ g.start[11:16] }}</td>
+            <td class="num muted">{{ _("seen") }} {{ g.visible_at[11:16] }}</td></tr>
+        {% endfor %}
+      </tbody></table>
+    </div>
+    {% endif %}
+  </div>
+</div>
+
+<div class="panes">
+
+  <!-- ============ PANE 2: the leaderboard ============ -->
+  <div class="pane pane-2">
+    <h2>{{ _("Leaderboard") }} <span class="tag" id="lb-total"></span></h2>
+    <div id="fav-bar" class="hidden" style="margin-bottom:10px"></div>
+    <div class="row tight" style="margin-bottom:10px">
+      <input id="lb-search" placeholder="{{ _('Search a team…') }}" oninput="renderBoard()"
+             style="flex:1 1 180px">
+      <select id="lb-window" onchange="renderBoard()" style="width:auto">
+        <option value="60">{{ _("top 60") }}</option>
+        <option value="120" selected>{{ _("top 120") }}</option>
+        <option value="300">{{ _("top 300") }}</option>
+        <option value="1500">{{ _("everything") }}</option>
+      </select>
+    </div>
+    <div class="scroll">
+      <table id="lb">
+        <thead><tr><th class="num">#</th><th>{{ _("Team") }}</th><th class="num">{{ _("Points") }}</th>
+                   <th class="num">{{ _("Elims") }}</th><th class="num">{{ _("Games") }}</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div id="team-detail" class="hidden" style="margin-top:14px;border-top:1px solid var(--line);
+         padding-top:14px"></div>
+  </div>
+
+  <!-- ============ PANE 3: the predictions ============ -->
+  <div class="pane pane-3">
+    <h2>{{ _("Starting estimate") }}</h2>
+    <div id="first"><p class="small muted">{{ _("Loading…") }}</p></div>
+
+    <h2 style="margin-top:22px">{{ _("Live predictions") }}</h2>
+    <div id="pred"><p class="small muted">{{ _("Loading…") }}</p></div>
+
+    <h3 style="margin-top:20px">{{ _("Progress") }}</h3>
+    <div id="chart"></div>
+
+    <details style="margin-top:14px">
+      <summary>{{ _("What the app has learned") }}</summary>
+      <div id="calib" class="small"></div>
+    </details>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+const COMP = {{ comp | tojson }};
+const KIND = {{ kind | tojson }};
+const REFRESH_MS = {{ refresh_minutes }} * 60 * 1000;
+const MODEL_NAMES = {linear: T('Average pace'), recent: T('Recent pace'), power: T('Power curve'),
+                     shape: T('Historical shape'), games: T('Per match played'), prior: T('Scoring + history')};
+let OBJECTIVES = {{ objectives | tojson }};
+let BOARD = [];
+let FAVOURITES = [];
+let PRED = null;
+let nextAt = Date.now() + REFRESH_MS;
+
+/* ---------------- pane 1: objectives and scoring ---------------- */
+function renderObjectives() {
+  if (!OBJECTIVES.length) OBJECTIVES = [{ label: '', rank: '' }];
+  document.getElementById('objectives').innerHTML = OBJECTIVES.map((o, i) => `
+    <div class="row tight" style="margin-bottom:6px">
+      <input value="${(o.label || '').replace(/"/g, '&quot;')}" placeholder="${T('Threshold')}"
+             oninput="OBJECTIVES[${i}].label=this.value" style="flex:2 1 110px">
+      <input type="number" value="${o.rank || ''}" placeholder="${T('Rank')}"
+             oninput="OBJECTIVES[${i}].rank=+this.value" style="flex:1 1 80px">
+      <button class="danger small" onclick="OBJECTIVES.splice(${i},1);renderObjectives()">×</button>
+    </div>`).join('');
+}
+
+function addObjective() {
+  OBJECTIVES.push({ label: '', rank: '' });
+  renderObjectives();
+}
+
+function saveObjectives() {
+  api('/api/objectives', 'PUT', { kind: KIND, region: COMP.region, items: OBJECTIVES })
+    .then(r => {
+      if (!r.ok) return toast(r.error || T('Error'), true);
+      OBJECTIVES = r.items;
+      renderObjectives();
+      renderBoard();
+      toast(T('Thresholds saved'));
+    });
+}
+
+function renderScoring() {
+  const s = COMP.scoring;
+  const box = document.getElementById('scoring');
+  const title = document.getElementById('scoring-title');
+  if (!box) return;
+  const known = COMP.scoring_known;
+  title.textContent = known ? T('Deduced scoring') : T('Scoring (assumption)');
+  if (!s || !s.placement || !s.placement.length) {
+    box.innerHTML = `<p class="small muted">${T('Not deduced yet.')}</p>`;
+    return;
+  }
+  const rows = s.placement.slice(0, 9).map(([a, b, p]) =>
+    `<tr><td>${a === b ? 'top ' + a : 'top ' + a + '–' + b}</td><td class="num">${p}</td></tr>`).join('');
+  box.innerHTML = `
+    ${known ? '' : `<p class="small" style="color:var(--warn);margin:0 0 8px">
+       ${T('Not deduced — generic scoring.')}</p>`}
+    <div class="kv"><span>${T('Per elimination')}</span><b>${s.kill} ${T('Pts')}</b></div>
+    ${s.kill_cap ? `<div class="kv"><span>${T('Elimination cap')}</span><b>${s.kill_cap} / ${T('Game')}</b></div>` : ''}
+    <table class="small" style="margin-top:6px"><tbody>${rows}</tbody></table>
+    ${s.placement.length > 9 ? `<p class="small muted">… ${s.placement.length - 9} ${T('more tiers')}</p>` : ''}
+    ${known && COMP.scoring_accuracy ? `<p class="small muted" style="margin-top:6px">
+       ${COMP.scoring_accuracy} % ${T('of scores reproduced.')}</p>` : ''}`;
+}
+
+/* ---------------- pane 2: leaderboard ---------------- */
+function loadBoard() {
+  // the leaderboard lives in the database, not the API — we can afford to load deep
+  // so objective rows stay visible even far down the table
+  const window_ = Number(document.getElementById('lb-window').value);
+  const deepest = Math.max(0, ...OBJECTIVES.map(o => o.rank));
+  const limit = Math.max(window_, deepest);
+  return api('/api/competitions/' + COMP.id + '/standings?limit=' + limit).then(r => {
+    BOARD = r.rows || [];
+    document.getElementById('lb-total').textContent = (r.total || 0) + ' ' + T('Teams');
+    document.getElementById('kv-depth').textContent = r.total || 0;
+    renderBoard();
+  });
+}
+
+function isFav(r) {
+  const hay = `${r.name || ''} ${r.members || ''}`.toLowerCase();
+  return FAVOURITES.some(f => hay.includes(f.name.toLowerCase()));
+}
+
+function loadFavourites() {
+  return api('/api/favourites?competition=' + COMP.id).then(r => {
+    FAVOURITES = r.items || [];
+    const bar = document.getElementById('fav-bar');
+    if (!FAVOURITES.length) { bar.classList.add('hidden'); return; }
+    bar.classList.remove('hidden');
+    const rows = (r.rows || []).map(x => `
+      <tr class="clickable" onclick="showTeam(${x.rank})">
+        <td class="num">${x.rank}</td><td>${x.members || x.name}</td>
+        <td class="num"><b>${fmtNum(x.score)}</b></td>
+        <td class="num muted">${x.games ?? '—'} ${T('Games')}</td></tr>`).join('');
+    bar.innerHTML = `<div class="fav-box">
+      <div class="row tight" style="align-items:baseline">
+        <b class="small">${T('Favourites')}</b>
+        <span class="small muted">${FAVOURITES.map(f => f.name).join(' · ')}</span>
+      </div>
+      ${rows ? `<table class="small" style="margin-top:6px"><tbody>${rows}</tbody></table>`
+             : `<p class="small muted" style="margin:6px 0 0">${T('No favourite in this leaderboard.')}</p>`}
+    </div>`;
+  });
+}
+
+function toggleFav(rank) {
+  const row = BOARD.find(r => r.rank === rank);
+  if (!row) return;
+  const hay = `${row.name || ''} ${row.members || ''}`.toLowerCase();
+  const hit = FAVOURITES.find(f => hay.includes(f.name.toLowerCase()));
+  if (hit) {
+    api('/api/favourites', 'DELETE', { name: hit.name })
+      .then(() => loadFavourites()).then(renderBoard);
+    return;
+  }
+  const names = (row.members || row.name || '').split(' + ').map(s => s.trim()).filter(Boolean);
+  const pick = names.length > 1
+    ? prompt(T('Which player do you want to follow?') + '\n\n' + names.map((n, i) => `${i + 1}. ${n}`).join('\n')
+             + '\n\n' + T('Number or name:'), '1')
+    : names[0];
+  if (!pick) return;
+  const name = /^\d+$/.test(pick.trim()) ? names[Number(pick.trim()) - 1] : pick.trim();
+  if (!name) return;
+  api('/api/favourites', 'POST', { name }).then(r => {
+    if (!r.ok) return toast(r.error || T('Error'), true);
+    toast(name + ' ' + T('followed'));
+    loadFavourites().then(renderBoard);
+  });
+}
+
+function teamName(r) {
+  // in duo/trio the API only surfaces one nickname — we show the whole team instead
+  const full = (r.members || '').trim();
+  return full || r.name || '—';
+}
+
+function renderBoard() {
+  const q = (document.getElementById('lb-search').value || '').toLowerCase();
+  const window_ = Number(document.getElementById('lb-window').value);
+  const goals = new Set(OBJECTIVES.map(o => o.rank));
+  let rows = BOARD.filter(r => !q || teamName(r).toLowerCase().includes(q));
+  if (!q) {
+    // the chosen window, plus objective rows wherever they fall
+    const inWindow = rows.filter(r => r.rank <= window_);
+    const pinned = rows.filter(r => r.rank > window_ && goals.has(r.rank));
+    rows = inWindow.concat(pinned);
+  }
+  const label = r => {
+    const hit = OBJECTIVES.find(o => o.rank === r.rank);
+    return hit ? `<span class="badge">${hit.label}</span>` : '';
+  };
+  const window2 = Number(document.getElementById('lb-window').value);
+  document.querySelector('#lb tbody').innerHTML = rows.map((r, i) => `
+    ${r.rank > window2 && (i === 0 || rows[i - 1].rank <= window2)
+      ? '<tr><td colspan="6" class="small muted" style="text-align:center;padding:6px">⋯</td></tr>' : ''}
+    <tr class="${goals.has(r.rank) ? 'objective' : ''}${isFav(r) ? ' fav' : ''} clickable"
+        onclick="showTeam(${r.rank})">
+      <td class="num">${r.rank}</td>
+      <td>${teamName(r)}${label(r)}</td>
+      <td class="num"><b>${fmtNum(r.score)}</b></td>
+      <td class="num muted">${r.kills ?? '—'}</td>
+      <td class="num muted">${r.games ?? '—'}</td>
+      <td class="num"><span class="star${isFav(r) ? ' on' : ''}"
+        title="${T('Follow this team')}"
+        onclick="event.stopPropagation();toggleFav(${r.rank})">★</span></td>
+    </tr>`).join('') ||
+    `<tr><td colspan="6" class="muted" style="text-align:center;padding:20px">${T('No rows.')}</td></tr>`;
+}
+
+function showTeam(rank) {
+  const box = document.getElementById('team-detail');
+  box.classList.remove('hidden');
+  box.innerHTML = `<p class="small muted">${T('Loading…')}</p>`;
+  api('/api/competitions/' + COMP.id + '/team/' + rank + '/detail').then(r => {
+    const t = r.team || {};
+    if (!r.steps.length) {
+      box.innerHTML = `<div class="row tight"><b>#${rank} ${teamName(t)}</b>
+        <span class="spacer"></span>
+        <button class="ghost small" onclick="hideTeam()">${T('Close')}</button></div>
+        <p class="small muted">${T('No match detail recorded.')}</p>`;
+      return;
+    }
+    const steps = r.steps.map(s => {
+      const move = s.moved === null || s.moved === 0 ? ''
+        : `<span style="color:${s.moved > 0 ? 'var(--ok)' : 'var(--warn)'}">${
+             s.moved > 0 ? '▲ +' : '▼ '}${Math.abs(s.moved)}</span>`;
+      return `<tr>
+        <td>${s.match_number}</td>
+        <td class="num">${s.placement ? 'top ' + s.placement : '—'}</td>
+        <td class="num">${s.kills ?? '—'}</td>
+        <td class="num">${s.time_alive ? (s.time_alive / 60).toFixed(1) + ' min' : '—'}</td>
+        <td class="num">${fmtNum(s.points)}</td>
+        <td class="num"><b>${fmtNum(s.total)}</b></td>
+        <td class="num"><b>${fmtNum(s.rank_after)}</b></td>
+        <td class="num small">${move}</td>
+      </tr>`;
+    }).join('');
+
+    const line = (label, key, unit = '') => `<tr>
+      <td>${label}</td>
+      <td class="num"><b>${r.team[key] ?? '—'}${unit}</b></td>
+      <td class="num muted">${r.top100[key] ?? '—'}${unit}</td>
+      <td class="num muted">${r.field[key] ?? '—'}${unit}</td></tr>`;
+
+    box.innerHTML = `
+      <div class="row tight" style="align-items:baseline">
+        <b>#${rank} ${teamName(t)}</b>
+        <span class="small muted">${fmtNum(t.score)} ${T('Pts')} · ${t.kills ?? '—'} ${T('Elims')} ·
+          ${r.steps.length} ${T('Games')}</span>
+        <span class="spacer"></span>
+        <span class="star${isFav(t) ? ' on' : ''}"
+              onclick="toggleFav(${rank})" title="${T('Follow')}">★</span>
+        <button class="ghost small" onclick="hideTeam()">${T('Close')}</button>
+      </div>
+      ${r.complete ? '' : `<p class="small" style="color:var(--warn);margin:8px 0 0">
+        ${T('The API only returned')} ${r.steps.length} ${T('matches out of')} ${r.official_games ?? '?'} —
+        ${T('recomputed total')} ${fmtNum(r.recomputed)} ${T('vs')} ${fmtNum(r.official_score)} ${T('on the leaderboard.')}</p>`}
+      <div class="row" style="align-items:flex-start;margin-top:10px">
+        <div style="flex:2 1 380px">
+          <table class="small">
+            <thead><tr><th>${T('Game')}</th><th class="num">${T('Place')}</th><th class="num">${T('Elims')}</th>
+              <th class="num">${T('Survival')}</th><th class="num">${T('Pts')}</th><th class="num">${T('Running total')}</th>
+              <th class="num">${T('Rank')}</th><th></th></tr></thead>
+            <tbody>${steps}</tbody>
+          </table>
+        </div>
+        <div style="flex:1 1 240px">
+          <table class="small">
+            <thead><tr><th></th><th class="num">${T('Team')}</th><th class="num">${T('Top 100')}</th>
+              <th class="num">${T('Field')}</th></tr></thead>
+            <tbody>
+              ${line(T('Elims / game'), 'kills_per_game')}
+              ${line(T('Points / game'), 'points_per_game')}
+              ${line(T('Average placement'), 'avg_placement')}
+              ${line(T('Best placement'), 'best_placement')}
+              ${line(T('Average survival'), 'avg_alive', ' min')}
+              ${line(T('Consistency (std dev)'), 'regularity')}
+              ${line(T('Wins'), 'wins')}
+              ${line(T('Top 10'), 'top10')}
+            </tbody>
+          </table>
+        </div>
+      </div>`;
+    box.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  });
+}
+
+function hideTeam() {
+  document.getElementById('team-detail').classList.add('hidden');
+}
+
+/* ---------------- pane 3: starting estimate ---------------- */
+function renderFirstEstimate() {
+  const box = document.getElementById('first');
+  const est = PRED && PRED.first_estimate;
+  if (!est || !est.ranks || !Object.keys(est.ranks).length) {
+    box.innerHTML = `<p class="small muted">${T('No finished tournament in this category yet — this one will be the first reference.')}</p>`;
+    return;
+  }
+  const goals = OBJECTIVES.map(o => o.rank);
+  const ranks = Object.keys(est.ranks).map(Number)
+    .sort((a, b) => (goals.includes(b) ? 1 : 0) - (goals.includes(a) ? 1 : 0) || a - b);
+
+  const rows = ranks.map(r => {
+    const g = est.ranks[r];
+    const goal = OBJECTIVES.find(o => o.rank === r);
+    const live = PRED.live && PRED.live.ok && PRED.live.ranks[r];
+    const now = live && live.ok ? live.value : null;
+    let ecart = '<span class="muted">—</span>';
+    if (g.real !== undefined) {
+      const sign = g.error_pct > 0 ? '+' : '';
+      const col = Math.abs(g.error_pct) <= 8 ? 'var(--ok)' : 'var(--warn)';
+      ecart = `<span style="color:${col}">${sign}${g.error_pct} %</span>`;
+    } else if (now) {
+      const diff = Math.round(100 * (g.value - now) / now);
+      ecart = `<span class="muted">${diff > 0 ? '+' : ''}${diff} % ${T('vs live')}</span>`;
+    }
+    return `<tr>
+      <td>${goal ? '<b>' + goal.label + '</b> · ' : ''}top ${r}</td>
+      <td class="num">${fmtNum(g.value)}</td>
+      <td class="num muted small">${fmtNum(g.low)}–${fmtNum(g.high)}</td>
+      <td class="num small">${ecart}</td>
+    </tr>`;
+  }).join('');
+
+  const approx = (est.scope || '').startsWith('⚠');
+  box.innerHTML = `
+    <p class="small muted" style="margin-top:-8px">
+      ${est.n_comps} ${T('tournament(s)')} de ${est.scope.replace('⚠ ', '')}${
+        approx ? ' — ' + T('outside the exact category, range widened') : ''}.
+    </p>
+    <table class="small">
+      <thead><tr><th>${T('Rank')}</th><th class="num">${T('Estimated')}</th><th class="num">${T('Range')}</th>
+                 <th class="num">${T('Gap')}</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+
+/* ---------------- pane 3: predictions ---------------- */
+function renderPredictions() {
+  const box = document.getElementById('pred');
+  if (!PRED || !PRED.live) return;
+  if (!PRED.live.ok) {
+    box.innerHTML = `<p class="small muted">${PRED.live.reason}</p>`;
+    return;
+  }
+  const goals = OBJECTIVES.map(o => o.rank);
+  const ordered = COMP.ranks.slice().sort((a, b) =>
+    (goals.includes(b) ? 1 : 0) - (goals.includes(a) ? 1 : 0) || a - b);
+
+  let html = '<div class="pred-grid">';
+  ordered.forEach(r => {
+    const p = PRED.live.ranks[r];
+    if (!p || !p.ok) return;
+    const goal = OBJECTIVES.find(o => o.rank === r);
+    const detail = (p.models || []).map(m =>
+      `<tr class="${m.dropped ? 'muted' : ''}"><td>${MODEL_NAMES[m.model] || m.label}</td>
+       <td class="num">${fmtNum(m.value)}</td></tr>`).join('');
+    html += `<div class="pred ${goal ? 'real' : ''}">
+      <div class="rank">${goal ? goal.label + ' · ' : ''}top ${r}</div>
+      <div class="val">${fmtNum(p.real !== undefined ? p.real : p.value)}</div>
+      <div class="range">${fmtNum(p.low)} – ${fmtNum(p.high)}</div>
+      <div class="now">${T('current')} ${fmtNum(p.current)} · +${fmtNum(p.remaining_gain)} ${T('to come')}</div>
+      <details><summary>${T('models')}</summary>
+        <table class="small" style="margin-top:6px"><tbody>${detail}</tbody></table></details>
+    </div>`;
+  });
+  html += '</div>';
+  const first = COMP.ranks.map(r => PRED.live.ranks[r]).find(p => p && p.ok);
+  html += `<p class="small muted" style="margin:12px 0 0">${T('Progression')} ${
+    first ? first.progress + ' %' : '—'} ${T('of the session')} · ${PRED.n_comparables} ${T('comparable tournament(s)')}
+    ${T('in the history.')}</p>`;
+  box.innerHTML = html;
+
+  const c = PRED.calibration || {};
+  document.getElementById('calib').innerHTML = c.n_comps
+    ? `<b>${c.n_comps}</b> ${T('tournament(s)')} — ${c.level}.<br>${T('Measured error:')} `
+      + Object.entries(c.model_error_pct || {}).sort((a, b) => a[1] - b[1])
+        .map(([k, v]) => `${MODEL_NAMES[k] || k} ${v} %`).join(' · ')
+    : `${T('No comparable tournament finished')} (${c.level || '—'}).`;
+}
+
+function renderChart() {
+  const dur = COMP.duration_min;
+  const goals = new Set(OBJECTIVES.map(o => o.rank));
+  const shown = COMP.ranks.filter(r => goals.has(r)).slice(0, 4);
+  const ranks = shown.length ? shown : COMP.ranks.slice(0, 4);
+  const series = [];
+  ranks.forEach((r, i) => {
+    const color = CHART_PALETTE[i % CHART_PALETTE.length];
+    const pts = COMP.snapshots.filter(s => s.points[r] !== undefined)
+      .map(s => ({ x: s.minutes, y: s.points[r] }));
+    if (pts.length) series.push({ name: 'top ' + r, color, points: pts });
+    const traj = PRED && PRED.trajectories && PRED.trajectories[r];
+    if (traj && traj.length && pts.length) {
+      const last = pts[pts.length - 1];
+      series.push({
+        name: 'top ' + r, color, dashed: true, noLegend: true, noTooltip: true, showDots: false,
+        points: [last].concat(traj.map(t => ({ x: t.progress * dur, y: t.value }))),
+        band: [{ x: last.x, lo: last.y, hi: last.y }].concat(
+          traj.map(t => ({ x: t.progress * dur, lo: t.low, hi: t.high }))),
+      });
+    }
+  });
+  drawChart(document.getElementById('chart'), {
+    series, height: 240, xMin: 0, xMax: dur || undefined,
+    marks: COMP.official_min ? [{ x: COMP.official_min, label: T('end') }] : [],
+    xFormat: v => fmtClock(v, COMP.start_time),
+    emptyText: T('Curves appear at the second measurement.'),
+  });
+}
+
+/* ---------------- cycle ---------------- */
+function finishNow() {
+  if (!confirm(T('Finish') + ' « ' + COMP.name + ' » ?\n\n'
+             + T("The thresholds from the last reading become final, the tournament is archived and joins its category's history."))) return;
+  const btn = document.getElementById('btn-finish');
+  btn.disabled = true;
+  api('/api/competitions/' + COMP.id + '/finish', 'POST', {}).then(r => {
+    if (!r.ok) { btn.disabled = false; return toast(r.error || T('Error'), true); }
+    location.href = '/';
+  });
+}
+
+function refreshNow() {
+  const btn = document.getElementById('btn-refresh');
+  btn.disabled = true;
+  btn.textContent = T('Refresh in progress…');
+  api('/api/competitions/' + COMP.id + '/refresh', 'POST', {}).then(r => {
+    btn.disabled = false;
+    btn.textContent = T('Refresh now (1 request)');
+    if (!r.ok) return toast(r.error || T('Error'), true);
+    nextAt = Date.now() + REFRESH_MS;
+    toast(T('Reading added') + ' — ' + r.n_rows + ' ' + T('teams read'));
+    reload();
+  });
+}
+
+function reload() {
+  return api('/api/competitions/' + COMP.id).then(c => {
+    Object.assign(COMP, c);
+    document.getElementById('kv-played').textContent =
+      (COMP.snapshots.length && COMP.snapshots[COMP.snapshots.length - 1].games) || '—';
+    renderScoring();
+    api('/api/competitions/' + COMP.id + '/matches').then(m => {
+      document.getElementById('kv-matches').textContent =
+        m.total ? fmtNum(m.total) + ' ' + T('out of') + ' ' + m.teams + ' ' + T('Teams') : '—';
+    });
+    return Promise.all([
+      loadBoard().then(loadFavourites),
+      api('/api/competitions/' + COMP.id + '/prediction').then(p => { PRED = p; }),
+    ]);
+  }).then(() => {
+    renderFirstEstimate();
+    renderPredictions();
+    renderChart();
+  });
+}
+
+function tick() {
+  if (COMP.finished) {
+    document.getElementById('countdown').textContent = T('Tournament finished');
+    return;
+  }
+  const left = nextAt - Date.now();
+  const box = document.getElementById('countdown');
+  if (left <= 0) {
+    box.textContent = T('automatic reading…');
+    nextAt = Date.now() + REFRESH_MS;
+    refreshNow();
+    return;
+  }
+  const m = Math.floor(left / 60000), s = Math.floor((left % 60000) / 1000);
+  box.textContent = `${T('Next refresh in')} ${m}:${String(s).padStart(2, '0')}`;
+}
+
+function toggleDetails() {
+  const box = document.getElementById('details');
+  box.classList.toggle('hidden');
+  document.getElementById('btn-details').textContent =
+    box.classList.contains('hidden') ? T('Details') : T('Hide');
+}
+
+renderObjectives();
+renderScoring();
+reload();
+setInterval(tick, 1000);
+window.addEventListener('resize', () => renderChart());
+</script>
+{% endblock %}

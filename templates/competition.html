@@ -1,0 +1,836 @@
+{% extends "base.html" %}
+{% set active = 'comps' %}
+{% block title %}{{ comp.name }} — Fortnite Comp Tracker{% endblock %}
+{% block content %}
+
+<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:6px">
+  <a href="/" class="muted small">&larr; {{ _("All competitions") }}</a>
+</div>
+
+<h1>{{ comp.name }}</h1>
+<div style="margin-bottom:12px">
+  <span class="tag accent">{{ comp.region }}</span>
+  <span class="tag">{{ comp.team_mode }}</span>
+  <span class="tag">{{ comp.game_mode }}</span>
+  <span class="tag">{{ comp.start_time[11:16] }} &rarr; {{ comp.end_time[11:16] if comp.end_time else '?' }}</span>
+  <span class="tag">{{ comp.max_games }} {{ _("Games") }} {{ _("sealed") if comp.sealed else _("max") }}</span>
+  {% if serie %}<a class="tag accent" href="/series/{{ serie.id }}">{{ serie.name }}</a>{% endif %}
+  {% if comp.stage %}<span class="tag">{{ comp.stage }}{% if comp.edition %} · {{ comp.edition }}{% endif %}</span>{% endif %}
+  <span id="tag-status" class="tag {{ 'done' if comp.finished else 'live' }}">
+    {{ _("finished") if comp.finished else _("live") }}</span>
+</div>
+
+<!-- ------------------------- time banner ------------------------- -->
+<div class="card timebar" id="timebar">
+  <div>
+    <h3>{{ _("Official end") }}</h3>
+    <div class="big" id="tb-official">—</div>
+    <div class="small muted" id="tb-official-at"></div>
+  </div>
+  <div>
+    <h3>{{ _("Collection ends") }}</h3>
+    <div class="big" id="tb-effective">—</div>
+    <div class="small muted" id="tb-effective-at"></div>
+  </div>
+  {% if comp.sealed %}
+  <div>
+    <h3>{{ _("Next game") }}</h3>
+    <div class="big" id="tb-next">—</div>
+    <div class="small muted" id="tb-next-at"></div>
+  </div>
+  <div style="flex:2 1 240px">
+    <h3>{{ _("Sealed format") }} · {{ comp.max_games }} {{ _("Games") }}</h3>
+    <div class="small muted">
+      {{ _("A game every") }} <b>{{ comp.slot_minutes|round(0)|int }} min</b>. {{ _("The leaderboard updates about") }}
+      <b>{{ (comp.game_minutes + comp.tracker_lag_min)|round(0)|int }} min</b> {{ _("after each game starts — that's the right moment to take a reading.") }}
+    </div>
+  </div>
+  {% else %}
+  <div style="flex:2 1 260px">
+    <h3>{{ _("Why later?") }}</h3>
+    <div class="small muted">
+      {{ _("A game started just before the cutoff still counts: it can last") }}
+      <b>{{ comp.game_minutes|round(0)|int }} min</b>, {{ _("and Fortnite Tracker takes") }}
+      <b>{{ comp.tracker_lag_min|round(0)|int }} min</b> {{ _("longer to display it.") }}
+      {{ _("So predictions target the collection end, over a maximum of") }}
+      <b>{{ comp.max_games }} {{ _("Games") }}</b>.
+    </div>
+  </div>
+  {% endif %}
+</div>
+
+{% if comp.sealed %}
+<details class="card" style="padding:12px 16px">
+  <summary>{{ _("Schedule for") }} {{ comp.max_games }} {{ _("Games") }}</summary>
+  <div class="table-wrap" style="margin-top:12px">
+    <table>
+      <thead><tr><th>{{ _("Game") }}</th><th>{{ _("Launch") }}</th><th>{{ _("Leaderboard updated") }}</th><th></th></tr></thead>
+      <tbody>
+        {% for g in comp.schedule %}
+        <tr id="sched-{{ g.index }}">
+          <td>{{ _("Game") }} {{ g.index }}</td>
+          <td class="mono">{{ g.start[11:16] }}</td>
+          <td class="mono">{{ g.visible_at[11:16] }}</td>
+          <td class="small muted"></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</details>
+{% endif %}
+
+<!-- ------------------------- actions ------------------------- -->
+<div class="card" style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+  <button id="btn-finish" onclick="finishComp()">{{ _("Finish the tournament") }}</button>
+  <button id="btn-reopen" class="ghost hidden" onclick="reopenComp()">{{ _("Reopen the tournament") }}</button>
+  <button class="ghost" onclick="duplicateComp()">{{ _("Duplicate for next time") }}</button>
+  <a class="btn ghost" href="/api/competitions/{{ comp.id }}/export.json">{{ _("Download this tournament") }}</a>
+  <button class="ghost" onclick="archiveComp()">{{ _("Save to") }} tournaments/</button>
+  <span class="spacer"></span>
+  <span class="small muted" id="archive-info"></span>
+</div>
+
+<details class="card" style="padding:12px 16px">
+  <summary>{{ _("Tournament settings") }}</summary>
+  <form onsubmit="return saveComp(event)" style="margin-top:14px">
+    <div class="row" style="margin-bottom:12px">
+      <div style="flex:2 1 280px">
+        <label>{{ _("Name") }}</label><input name="name" value="{{ comp.name }}">
+      </div>
+      <div><label>{{ _("Region") }}</label>
+        <select name="region">
+          {% for r in regions %}<option {{ 'selected' if r == comp.region }}>{{ r }}</option>{% endfor %}
+        </select>
+      </div>
+      <div><label>{{ _("Mode") }}</label>
+        <select name="team_mode">
+          {% for m in team_modes %}<option {{ 'selected' if m == comp.team_mode }}>{{ m }}</option>{% endfor %}
+        </select>
+      </div>
+      <div><label>{{ _("Type") }}</label>
+        <select name="game_mode">
+          {% for g in game_modes %}<option {{ 'selected' if g == comp.game_mode }}>{{ g }}</option>{% endfor %}
+        </select>
+      </div>
+    </div>
+    <div class="row" style="margin-bottom:12px">
+      <div><label>{{ _("Start") }}</label>
+        <input type="datetime-local" name="start_time" value="{{ comp.start_time.replace(' ', 'T')[:16] }}">
+      </div>
+      <div><label>{{ _("Official end") }}</label>
+        <input type="datetime-local" name="end_time" value="{{ comp.end_time.replace(' ', 'T')[:16] if comp.end_time else '' }}">
+      </div>
+      <div><label>{{ _("Tracked ranks") }}</label><input name="ranks" value="{{ comp.ranks|join(', ') }}"></div>
+    </div>
+    <div class="row" style="margin-bottom:12px">
+      <div><label>{{ _("Max length of a game (min)") }}</label>
+        <input type="number" step="any" name="game_minutes" value="{{ comp.game_minutes|round(0)|int }}">
+      </div>
+      <div><label>{{ _("Tracker delay (min)") }}</label>
+        <input type="number" step="any" name="tracker_lag_min" value="{{ comp.tracker_lag_min|round(0)|int }}">
+      </div>
+      <div><label>{{ _("Number of games") }}</label>
+        <input type="number" name="max_games" id="f-max-games" value="{{ comp.max_games }}">
+      </div>
+      <div style="flex:2 1 240px"><label>{{ _("Counting of games") }}</label>
+        <select name="games_mode" id="f-games-mode" onchange="toggleSlot()">
+          {# labels come from db.GAMES_MODES, so translate them here #}
+          {% for key, label in games_modes.items() %}
+            <option value="{{ key }}" {{ 'selected' if key == comp.games_mode }}>{{ _(label) }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div id="f-slot-wrap"><label>{{ _("Interval between two games (min)") }}</label>
+        <input type="number" step="any" name="slot_minutes" id="f-slot"
+               value="{{ comp.slot_minutes|round(0)|int }}">
+      </div>
+    </div>
+    <p class="small muted" style="margin:-4px 0 12px">
+      <b>{{ _("Maximum") }}</b> : {{ _("everyone plays whenever they want, up to this number of games — that's the case for opens and cash cups.") }}
+      <b>{{ _("Sealed") }}</b> : {{ _("all games start at a fixed time and everyone plays the same number of them, like in a final.") }}
+      {{ _("With sealed play, the app knows the exact time of each game and no longer needs to estimate where the leaderboard stands.") }}
+    </p>
+    <button type="submit">{{ _("Save settings") }}</button>
+  </form>
+
+  <hr style="border:none;border-top:1px solid var(--line);margin:18px 0">
+  <h3>{{ _("Points scoring") }}</h3>
+  <p class="small muted" style="margin-top:-4px">
+    {{ _("Translates the points table into a concrete per-game target.") }}
+    {{ _("One line per tier:") }} <span class="mono">1 = 60</span> {{ _("or") }} <span class="mono">11-15 = 20</span>.
+    {{ _("Check the values against the tournament's official rules — they change from season to season.") }}
+  </p>
+  <div class="row" style="align-items:flex-start">
+    <div style="flex:1 1 200px">
+      <label>{{ _("Load a saved scoring") }}</label>
+      <select id="saved-scoring" onchange="applySaved()">
+        <option value="">— {{ _("choose") }} —</option>
+        {% for s in scorings %}
+          <option value="{{ s.id }}" {{ 'selected' if s.id == comp.scoring_id }}>{{ s.name }}</option>
+        {% endfor %}
+      </select>
+      <p class="small muted" style="margin:6px 0 0">
+        {{ _("Manage the list at") }} <a href="/scoring">{{ _("Scoring") }}</a>.
+      </p>
+      <label style="margin-top:12px">{{ _("Points per elimination") }}</label>
+      <input type="number" step="any" id="kill-pts" value="{{ comp.scoring.kill }}">
+      <button type="button" style="margin-top:12px" onclick="saveScoring()">{{ _("Apply to this tournament") }}</button>
+      <button type="button" class="ghost" style="margin-top:8px" onclick="saveScoringAs()">
+        {{ _("Save under a name…") }}</button>
+    </div>
+    <div style="flex:1 1 220px">
+      <label>{{ _("Placement points") }} <span class="muted">— {{ _("paste your table here") }}</span></label>
+      <textarea id="placement" rows="10" class="mono" style="resize:vertical"
+                placeholder="1st&#9;65 (+9)&#9;32&#10;2nd&#9;56 (+4)&#9;28&#10;…"></textarea>
+      <div id="placement-hint" class="small muted" style="margin-top:6px"></div>
+    </div>
+  </div>
+</details>
+
+<div class="grid side">
+  <div>
+    <!-- ------------------------- chart ------------------------- -->
+    <div class="card">
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;flex-wrap:wrap">
+        <h2 style="margin:0">{{ _("Threshold trend") }}</h2>
+        <span class="spacer"></span>
+        <select id="x-mode" onchange="renderChart()" style="width:auto">
+          <option value="clock">{{ _("Real time") }}</option>
+          <option value="minutes">{{ _("Minutes since start") }}</option>
+          <option value="progress">% {{ _("of the session") }}</option>
+        </select>
+        <label class="small" style="display:flex;align-items:center;gap:6px;margin:0;width:auto">
+          <input type="checkbox" id="show-pred" checked onchange="renderChart()" style="width:auto">
+          {{ _("Predicted extension") }}
+        </label>
+      </div>
+      <div id="chart"></div>
+    </div>
+
+    <!-- ------------------------- readings ------------------------- -->
+    <div class="card">
+      <h2>{{ _("Readings entered") }}</h2>
+      <div class="table-wrap">
+        <table id="snap-table">
+          <thead>
+            <tr>
+              <th>{{ _("Time") }}</th><th class="num">{{ _("Games") }}</th><th class="num">%</th>
+              {% for r in comp.ranks %}<th class="num">Top {{ r }}</th>{% endfor %}
+              <th class="num">{{ _("Me") }}</th><th></th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p class="small muted" style="margin:10px 0 0">
+        {{ _("Double-click a value to correct it.") }}
+      </p>
+    </div>
+
+    <div class="card" id="card-me">
+      <h2>{{ _("My race") }}</h2>
+      <div id="me"><p class="muted small">{{ _("Loading…") }}</p></div>
+    </div>
+  </div>
+
+  <!-- ------------------------- right column ------------------------- -->
+  <div>
+    <div class="card">
+      <h2>{{ _("New reading") }}</h2>
+      <form onsubmit="return addSnapshot(event)">
+        <div class="row" style="margin-bottom:12px">
+          <div style="flex:2 1 180px">
+            <label>{{ _("Reading time") }}</label>
+            <input type="datetime-local" name="ts" id="snap-ts" value="{{ now }}" required>
+          </div>
+          <div style="flex:1 1 90px">
+            <label>{{ _("Games played") }}</label>
+            <input type="number" min="0" max="{{ comp.max_games }}" name="games" id="snap-games" placeholder="—">
+          </div>
+        </div>
+        <button type="button" class="ghost small" style="margin-bottom:12px"
+                onclick="document.getElementById('snap-ts').value = localNow()">{{ _("Now") }}</button>
+        <div class="row" style="margin-bottom:12px">
+          {% for r in comp.ranks %}
+          <div style="flex:1 1 80px">
+            <label>Top {{ r }}</label>
+            <input type="number" step="any" name="rank_{{ r }}" inputmode="numeric" placeholder="—">
+          </div>
+          {% endfor %}
+        </div>
+        <div class="row" style="margin-bottom:12px">
+          <div><label>{{ _("My points") }} ({{ _("optional") }})</label>
+            <input type="number" step="any" name="my_points" inputmode="numeric" placeholder="—">
+          </div>
+          <div style="flex:2 1 180px"><label>{{ _("Note") }}</label>
+            <input name="note" placeholder="{{ _('e.g.: died in top 20') }}">
+          </div>
+        </div>
+        <button type="submit">{{ _("Add the reading") }}</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>{{ _("Final results") }}</h2>
+      <p class="small muted" style="margin-top:-8px">
+        {{ _("The real thresholds once the tournament is done. They're what future competitions are estimated against.") }}
+      </p>
+      <form onsubmit="return saveFinals(event)">
+        <div class="row" style="margin-bottom:12px">
+          {% for r in comp.ranks %}
+          <div style="flex:1 1 80px">
+            <label>Top {{ r }}</label>
+            <input type="number" step="any" id="final-{{ r }}" inputmode="numeric" placeholder="—">
+          </div>
+          {% endfor %}
+        </div>
+        <div class="row tight">
+          <button type="submit">{{ _("Save the results") }}</button>
+          <button type="button" class="ghost" onclick="fillFinalsFromLast()">{{ _("Reuse the last reading") }}</button>
+          <button type="button" class="danger" onclick="clearFinals()">{{ _("Clear") }}</button>
+        </div>
+      </form>
+      <div id="finals-status" class="small muted" style="margin-top:12px"></div>
+    </div>
+
+    <div class="card">
+      <h2 id="pred-title">{{ _("End-of-session prediction") }}</h2>
+      <div id="pred-live"><p class="muted small">{{ _("Loading…") }}</p></div>
+    </div>
+
+    <div class="card">
+      <h2>{{ _("What the app has learned") }}</h2>
+      <div id="calib"><p class="muted small">{{ _("Loading…") }}</p></div>
+    </div>
+
+    <div class="card">
+      <h2>{{ _("Historical trend") }}</h2>
+      <p class="small muted" style="margin-top:-8px">
+        {{ _("Final thresholds from comparable competitions") }} ({{ comp.region }} · {{ comp.team_mode }} · {{ comp.game_mode }}).
+      </p>
+      <div id="pred-hist"><p class="muted small">{{ _("Loading…") }}</p></div>
+    </div>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+const COMP = {{ comp | tojson }};
+const SCORINGS = {{ scorings | tojson }};
+const MODEL_NAMES = {linear: T('Average pace'), recent: T('Recent pace'), power: T('Power curve'),
+                     shape: T('Historical shape'), games: T('Per match played')};
+let PRED = null;
+
+/* ------------------------------ table ------------------------------ */
+function renderTable() {
+  const tb = document.querySelector('#snap-table tbody');
+  const cols = COMP.ranks.length + 5;
+  tb.innerHTML = '';
+  if (!COMP.snapshots.length) {
+    tb.innerHTML = `<tr><td colspan="${cols}" class="muted"
+                    style="text-align:center;padding:26px">${T('No reading yet.')}</td></tr>`;
+    return;
+  }
+  COMP.snapshots.forEach(s => {
+    const tr = document.createElement('tr');
+    const games = s.games !== null && s.games !== undefined
+      ? s.games : `<span class="muted" title="${T('estimated from the time')}">~${s.games_est ?? '—'}</span>`;
+    let cells = `<td>${s.ts.slice(11, 16)}<div class="small muted">${s.note || ''}</div></td>
+                 <td class="num" ondblclick="editField(${s.id}, 'games', this)"
+                     style="cursor:cell">${games}</td>
+                 <td class="num">${s.progress !== null ? Math.round(s.progress * 100) + '%' : '—'}</td>`;
+    COMP.ranks.forEach(r => {
+      const v = s.points[r];
+      cells += `<td class="num" ondblclick="editCell(${s.id}, ${r}, this)"
+                 style="cursor:cell">${v === undefined ? '—' : fmtNum(v)}</td>`;
+    });
+    cells += `<td class="num" ondblclick="editField(${s.id}, 'my_points', this)" style="cursor:cell;color:var(--accent)">
+                ${s.my_points === null || s.my_points === undefined ? '—' : fmtNum(s.my_points)}</td>`;
+    cells += `<td><button class="small danger" onclick="delSnap(${s.id})">×</button></td>`;
+    tr.innerHTML = cells;
+    tb.appendChild(tr);
+  });
+}
+
+function editCell(sid, rank, td) {
+  const val = prompt(T('Points for top') + ' ' + rank + ' :', td.textContent.replace(/\s/g, '').replace('—', ''));
+  if (val === null) return;
+  api('/api/snapshots/' + sid, 'PUT', { points: { [rank]: val } }).then(reload);
+}
+
+function editField(sid, field, td) {
+  const label = field === 'games' ? T('Games played') : T('My points');
+  const val = prompt(label + ' :', td.textContent.replace(/[\s~]/g, '').replace('—', ''));
+  if (val === null) return;
+  api('/api/snapshots/' + sid, 'PUT', { [field]: val }).then(reload);
+}
+
+function delSnap(sid) {
+  if (!confirm(T('Delete this reading?'))) return;
+  api('/api/snapshots/' + sid, 'DELETE').then(reload);
+}
+
+/* ------------------------------ entry ------------------------------ */
+function addSnapshot(ev) {
+  ev.preventDefault();
+  const form = ev.target;
+  const points = {};
+  COMP.ranks.forEach(r => {
+    const v = form['rank_' + r].value;
+    if (v !== '') points[r] = v;
+  });
+  if (!Object.keys(points).length && form.my_points.value === '') {
+    toast(T('Enter at least one value.'), true);
+    return false;
+  }
+  api(`/api/competitions/${COMP.id}/snapshots`, 'POST', {
+    ts: form.ts.value, note: form.note.value, points,
+    games: form.games.value, my_points: form.my_points.value,
+  }).then(r => {
+    if (!r.ok) return toast(r.error || T('Error'), true);
+    toast(T('Reading added'));
+    COMP.ranks.forEach(r2 => form['rank_' + r2].value = '');
+    form.note.value = '';
+    form.my_points.value = '';
+    if (form.games.value !== '') form.games.value = Number(form.games.value) + 1;
+    form.ts.value = localNow();
+    reload();
+  });
+  return false;
+}
+
+function saveComp(ev) {
+  ev.preventDefault();
+  const data = Object.fromEntries(new FormData(ev.target).entries());
+  api('/api/competitions/' + COMP.id, 'PUT', data).then(r => {
+    if (r.ok) location.reload(); else toast(r.error || T('Error'), true);
+  });
+  return false;
+}
+
+/* --------------------------- points scoring --------------------------- */
+function renderScoring() {
+  document.getElementById('placement').value = scoringToText(COMP.scoring);
+  document.getElementById('kill-pts').value = (COMP.scoring && COMP.scoring.kill) || 0;
+}
+
+function applySaved() {
+  const id = Number(document.getElementById('saved-scoring').value);
+  const s = SCORINGS.find(x => x.id === id);
+  if (!s) return;
+  document.getElementById('placement').value = scoringToText(s);
+  document.getElementById('kill-pts').value = s.kill;
+  toast(T('Scoring «') + ' ' + s.name + ' ' + T('» loaded — click Apply to keep it.'));
+}
+
+function saveScoringAs() {
+  const name = prompt(T('Name for the scoring to save:'), T('My scoring'));
+  if (name === null) return;
+  const scoring = textToScoring(document.getElementById('placement').value,
+                                document.getElementById('kill-pts').value);
+  if (!scoring.placement.length) return toast(T('Unreadable scoring.'), true);
+  api('/api/scorings', 'POST', { name, ...scoring }).then(r => {
+    if (!r.ok) return toast(r.error || T('Error'), true);
+    SCORINGS.push(r.scoring);
+    const sel = document.getElementById('saved-scoring');
+    sel.insertAdjacentHTML('beforeend',
+      `<option value="${r.scoring.id}">${r.scoring.name}</option>`);
+    sel.value = r.scoring.id;
+    toast(T('Scoring «') + ' ' + r.scoring.name + ' ' + T('» saved'));
+  });
+}
+
+function saveScoring() {
+  const scoring = textToScoring(document.getElementById('placement').value,
+                                document.getElementById('kill-pts').value);
+  if (!scoring.placement.length) return toast(T('Unreadable scoring — one line per tier.'), true);
+  api('/api/competitions/' + COMP.id, 'PUT', { scoring }).then(r => {
+    if (!r.ok) return toast(r.error || T('Error'), true);
+    toast(T('Scoring saved'));
+    COMP.scoring = scoring;
+    reload();
+  });
+}
+
+/* --------------------------- tournament actions --------------------------- */
+function finishComp() {
+  if (!confirm(T('Finish the tournament?') + '\n\n'
+             + T('It will be marked finished, the last reading will serve as final results (editable afterward), and a file will be saved to the tournaments/ folder.'))) return;
+  api('/api/competitions/' + COMP.id + '/finish', 'POST', {}).then(r => {
+    if (!r.ok) return toast(r.error || T('Error'), true);
+    toast(T('Tournament finished and archived'));
+    document.getElementById('archive-info').textContent = T('Archived:') + ' ' + r.archive_name;
+    reload();
+  });
+}
+
+function reopenComp() {
+  api('/api/competitions/' + COMP.id + '/reopen', 'POST', {}).then(() => {
+    toast(T('Tournament reopened'));
+    reload();
+  });
+}
+
+function archiveComp() {
+  api('/api/competitions/' + COMP.id + '/archive', 'POST', {}).then(r => {
+    if (!r.ok) return toast(r.error || T('Error'), true);
+    document.getElementById('archive-info').textContent = T('Archived:') + ' ' + r.archive_name;
+    toast(T('File saved'));
+  });
+}
+
+function duplicateComp() {
+  const next = prompt(T('Start date and time for the next tournament:'),
+                      COMP.start_time.slice(0, 16).replace(' ', 'T'));
+  if (next === null) return;
+  api('/api/competitions/' + COMP.id + '/duplicate', 'POST', { start_time: next }).then(r => {
+    if (!r.ok) return toast(r.error || T('Error'), true);
+    location.href = '/competition/' + r.id;
+  });
+}
+
+function renderStatus() {
+  const done = !!COMP.finished_at;
+  document.getElementById('btn-finish').classList.toggle('hidden', done);
+  document.getElementById('btn-reopen').classList.toggle('hidden', !done);
+  const tag = document.getElementById('tag-status');
+  tag.textContent = done ? T('finished') : T('live');
+  tag.className = 'tag ' + (done ? 'done' : 'live');
+}
+
+/* --------------------------- final results --------------------------- */
+function renderFinals() {
+  const finals = COMP.finals || {};
+  COMP.ranks.forEach(r => {
+    const el = document.getElementById('final-' + r);
+    if (el) el.value = finals[r] !== undefined ? finals[r] : '';
+  });
+  const n = Object.keys(finals).length;
+  document.getElementById('finals-status').innerHTML = n
+    ? `<span style="color:var(--ok)">✓ ${n} ${T('final threshold(s) saved.')}</span> ` +
+      T('This competition is used as a reference for future estimates.')
+    : T('No final results yet: until they\'re filled in, this competition only counts toward the history once it\'s marked finished.');
+}
+
+function saveFinals(ev) {
+  ev.preventDefault();
+  const points = {};
+  COMP.ranks.forEach(r => { points[r] = document.getElementById('final-' + r).value; });
+  api('/api/competitions/' + COMP.id + '/finals', 'PUT', { points }).then(r => {
+    if (!r.ok) return toast(r.error || T('Error'), true);
+    toast(T('Final results saved'));
+    reload();
+  });
+  return false;
+}
+
+function fillFinalsFromLast() {
+  const last = COMP.snapshots[COMP.snapshots.length - 1];
+  if (!last) return toast(T('No reading to reuse.'), true);
+  COMP.ranks.forEach(r => {
+    const el = document.getElementById('final-' + r);
+    if (el && last.points[r] !== undefined) el.value = last.points[r];
+  });
+  toast(T('Values from the reading at') + ' ' + last.ts.slice(11, 16) + ' ' + T('reused — remember to save.'));
+}
+
+function clearFinals() {
+  if (!confirm(T('Clear this competition\'s final results?'))) return;
+  api('/api/competitions/' + COMP.id + '/finals', 'DELETE').then(() => {
+    toast(T('Final results cleared'));
+    reload();
+  });
+}
+
+/* ------------------------------ countdown ------------------------------ */
+function fmtDelay(ms) {
+  if (ms <= 0) return null;
+  const min = Math.round(ms / 60000);
+  return min >= 60 ? `${Math.floor(min / 60)} h ${String(min % 60).padStart(2, '0')}` : `${min} min`;
+}
+
+function renderCountdown() {
+  const parse = s => s ? new Date(s.replace(' ', 'T')) : null;
+  const end = parse(COMP.end_time), eff = parse(COMP.effective_end), now = new Date();
+  const set = (id, date, doneText) => {
+    const box = document.getElementById(id);
+    const at = document.getElementById(id + '-at');
+    if (!date) { box.textContent = '—'; return; }
+    const left = fmtDelay(date - now);
+    box.textContent = left ? T('in') + ' ' + left : doneText;
+    box.style.color = left ? '' : 'var(--muted)';
+    at.textContent = date.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+  };
+  set('tb-official', end, T('finished'));
+  set('tb-effective', eff, T('finished'));
+
+  if (!COMP.sealed || !COMP.schedule.length) return;
+  const next = COMP.schedule.find(g => parse(g.start) > now);
+  const box = document.getElementById('tb-next');
+  if (box) {
+    if (next) {
+      box.textContent = T('in') + ' ' + (fmtDelay(parse(next.start) - now) || '0 min');
+      document.getElementById('tb-next-at').textContent =
+        T('Game') + ' ' + next.index + ' ' + T('at') + ' ' + parse(next.start).toLocaleTimeString('fr-FR',
+          { hour: '2-digit', minute: '2-digit' });
+    } else {
+      box.textContent = T('all played');
+      box.style.color = 'var(--muted)';
+      document.getElementById('tb-next-at').textContent = '';
+    }
+  }
+  COMP.schedule.forEach(g => {
+    const row = document.getElementById('sched-' + g.index);
+    if (!row) return;
+    const cell = row.lastElementChild;
+    if (parse(g.visible_at) <= now) { cell.textContent = T('Leaderboard updated'); cell.style.color = 'var(--ok)'; }
+    else if (parse(g.start) <= now) { cell.textContent = T('live'); cell.style.color = 'var(--warn)'; }
+    else { cell.textContent = T('to come'); cell.style.color = ''; }
+  });
+}
+
+function toggleSlot() {
+  const sealed = document.getElementById('f-games-mode').value === 'sealed';
+  const wrap = document.getElementById('f-slot-wrap');
+  if (wrap) wrap.classList.toggle('hidden', !sealed);
+  const slot = document.getElementById('f-slot');
+  if (sealed && slot && !Number(slot.value)) slot.value = Math.round(COMP.game_minutes + 5);
+}
+
+/* ------------------------------ my race ------------------------------ */
+function renderMe() {
+  const box = document.getElementById('me');
+  const me = PRED && PRED.me;
+  if (!me || !me.ok) {
+    box.innerHTML = `<p class="muted small">${(me && me.reason) ||
+      T('Enter your own points in a reading to track your race.')}</p>`;
+    return;
+  }
+  const rows = me.targets.map(t => `
+    <tr class="${t.reached ? 'reached' : ''}">
+      <td>Top ${t.rank}</td>
+      <td class="num">${fmtNum(t.goal)}</td>
+      <td class="num">${t.reached ? '<span style="color:var(--ok)">' + T('reached') + '</span>' : '+' + fmtNum(t.gap)}</td>
+      <td class="num">${t.per_game === null || t.reached ? '—' : fmtNum(t.per_game)}</td>
+      <td class="small muted">${t.hint}</td>
+    </tr>`).join('');
+  box.innerHTML = `
+    <div class="row tight" style="margin-bottom:12px">
+      <div class="pred" style="flex:1 1 120px">
+        <div class="rank">${T('My points')}</div><div class="val">${fmtNum(me.my_points)}</div>
+        <div class="range">${me.per_game_so_far ?? '—'} / ${T('Game')}</div>
+      </div>
+      <div class="pred" style="flex:1 1 120px">
+        <div class="rank">${T('Estimated rank')}</div>
+        <div class="val">${me.estimated_rank ? '≈ ' + fmtNum(me.estimated_rank) : T('outside the top')}</div>
+        <div class="range">${me.games_played} ${T('Games played')}</div>
+      </div>
+      <div class="pred" style="flex:1 1 120px">
+        <div class="rank">${T('Games remaining')}</div><div class="val">${me.games_left}</div>
+        <div class="range">${T('max')} ${fmtNum(me.max_game_score)} ${T('Pts')} / ${T('Game')}</div>
+      </div>
+    </div>
+    <div class="table-wrap"><table class="small">
+      <thead><tr><th>${T('Goal')}</th><th class="num">${T('Target threshold')}</th><th class="num">${T('Gap')}</th>
+                 <th class="num">/ ${T('Game')}</th><th>${T('What to do')}</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>`;
+}
+
+/* ------------------------------ chart ------------------------------ */
+function renderChart() {
+  const mode = document.getElementById('x-mode').value;
+  const showPred = document.getElementById('show-pred').checked;
+  const dur = COMP.duration_min;          // up to the collection end
+
+  const toX = min => mode === 'progress' ? (dur ? 100 * min / dur : min) : min;
+  const xFormat = v => {
+    if (mode === 'progress') return Math.round(v) + '%';
+    if (mode === 'clock') return fmtClock(v, COMP.start_time);
+    return Math.round(v) + ' min';
+  };
+
+  const finals = COMP.finals || {};
+  const series = [];
+  COMP.ranks.forEach((r, i) => {
+    const color = CHART_PALETTE[i % CHART_PALETTE.length];
+    const pts = COMP.snapshots
+      .filter(s => s.points[r] !== undefined)
+      .map(s => ({ x: toX(s.minutes), y: s.points[r] }));
+    const lastSnap = pts[pts.length - 1];
+    if (finals[r] !== undefined && dur && (!lastSnap || lastSnap.x < toX(dur))) {
+      pts.push({ x: toX(dur), y: finals[r] });
+    }
+    if (pts.length) series.push({ name: 'Top ' + r, color, points: pts });
+
+    if (showPred && PRED && PRED.trajectories && PRED.trajectories[r] && lastSnap) {
+      const traj = PRED.trajectories[r];
+      if (traj.length) {
+        const line = [lastSnap].concat(traj.map(t => ({ x: toX(t.progress * dur), y: t.value })));
+        const band = [{ x: lastSnap.x, lo: lastSnap.y, hi: lastSnap.y }].concat(
+          traj.map(t => ({ x: toX(t.progress * dur), lo: t.low, hi: t.high })));
+        series.push({ name: 'Top ' + r, color, points: line, band,
+                      dashed: true, noLegend: true, noTooltip: true, showDots: false });
+      }
+    }
+  });
+
+  const marks = [];
+  if (COMP.official_min) marks.push({ x: toX(COMP.official_min), label: T('Official end') });
+
+  drawChart(document.getElementById('chart'), {
+    series, marks, xFormat, height: 400,
+    xMin: toX(0), xMax: dur ? toX(dur) : undefined,
+    emptyText: T('Add a reading to see the curve.')
+  });
+}
+
+/* ------------------------------ predictions ------------------------------ */
+function renderPredictions() {
+  const live = document.getElementById('pred-live');
+  const hist = document.getElementById('pred-hist');
+  if (!PRED) return;
+
+  if (!PRED.live.ok) {
+    live.innerHTML = `<p class="muted small">${PRED.live.reason}</p>`;
+  } else {
+    let html = '<div class="pred-grid">';
+    COMP.ranks.forEach(r => {
+      const p = PRED.live.ranks[r];
+      if (!p || !p.ok) {
+        html += `<div class="pred${p && p.real !== undefined ? ' real' : ''}">
+                 <div class="rank">Top ${r}${p && p.real !== undefined ? ' — ' + T('actual result') : ''}</div>
+                 ${p && p.real !== undefined ? `<div class="val">${fmtNum(p.real)}</div>` : ''}
+                 <div class="muted small" style="margin-top:8px">${(p && p.reason) || '—'}</div></div>`;
+        return;
+      }
+      const models = p.models.map(m =>
+        `<tr class="${m.dropped ? 'muted' : ''}"><td>${m.label}${m.dropped ? ' (' + T('discarded') + ')' : ''}</td>
+             <td class="num">${fmtNum(m.value)}</td>
+             <td class="num muted">${m.backtest_error_pct === null ? '—' : m.backtest_error_pct + ' %'}</td></tr>`).join('');
+      const detail = `<details><summary>${T('model detail')}</summary>
+          <table class="small" style="margin-top:6px">
+            <thead><tr><th>${T('Model')}</th><th class="num">${T('Est.')}</th><th class="num">${T('Err.')}</th></tr></thead>
+            <tbody>${models}</tbody>
+          </table>
+        </details>`;
+
+      if (p.real !== undefined) {
+        const gap = p.error_pct === undefined ? '' :
+          `${T('estimated')} ${fmtNum(p.value)} · ${T('Gap')} ${p.error_pct > 0 ? '+' : ''}${p.error_pct} %`;
+        html += `<div class="pred real">
+          <div class="rank">Top ${r} — ${T('actual result')}</div>
+          <div class="val">${fmtNum(p.real)}</div>
+          <div class="range">${gap}</div>
+          <div class="now" style="color:${p.in_range ? 'var(--ok)' : 'var(--warn)'}">
+            ${p.in_range === undefined ? '' : (p.in_range ? T('within the predicted range')
+                                                          : T('outside the predicted range'))}</div>
+          ${detail}
+        </div>`;
+        return;
+      }
+
+      html += `<div class="pred">
+        <div class="rank">Top ${r} — ${T('estimated final')}</div>
+        <div class="val">${fmtNum(p.value)}</div>
+        <div class="range">${fmtNum(p.low)} – ${fmtNum(p.high)}</div>
+        <div class="now">${T('current')} ${fmtNum(p.current)} · +${fmtNum(p.remaining_gain)} ${T('remaining')}</div>
+        ${detail}
+      </div>`;
+    });
+    html += '</div>';
+    const first = COMP.ranks.map(r => PRED.live.ranks[r]).find(p => p && p.ok);
+    html += `<p class="small muted" style="margin:12px 0 0">${
+      PRED.live.has_finals
+        ? T('Gap between what the models projected from readings alone and the actual result.')
+        : T('Progression:') + ' ' + (first ? first.progress + ' %' : '—') + ' ' + T('of the session') + ' (' + T('collection end included') + ').'} ·
+      ${PRED.n_comparables} ${T('comparable competition(s) used for the curve shape.')}</p>`;
+    live.innerHTML = html;
+    document.getElementById('pred-title').textContent =
+      PRED.live.has_finals ? T('Estimated vs actual') : T('End-of-session prediction');
+  }
+
+  let h = '<div class="pred-grid">';
+  let any = false;
+  COMP.ranks.forEach(r => {
+    const p = PRED.history[r];
+    if (!p || !p.ok) return;
+    any = true;
+    h += `<div class="pred hist">
+      <div class="rank">Top ${r} — ${T('next comp.')}</div>
+      <div class="val">${fmtNum(p.value)}</div>
+      <div class="range">${fmtNum(p.low)} – ${fmtNum(p.high)}</div>
+      <div class="now" style="color:var(--muted)">${p.n} ${T('comp.')} · ${T('trend')} ${
+        p.trend_per_comp > 0 ? '+' : ''}${p.trend_per_comp}/${T('comp.')}</div>
+    </div>`;
+  });
+  h += '</div>';
+  hist.innerHTML = any ? h :
+    `<p class="muted small">${T('Not enough comparable competitions finished yet. Add a second one of the same type to activate this estimate.')}</p>`;
+}
+
+function renderCalibration() {
+  const box = document.getElementById('calib');
+  const c = PRED && PRED.calibration;
+  if (!c) return;
+  if (!c.n_comps) {
+    box.innerHTML = `<p class="muted small">${T('No comparable finished competition yet (search:')}
+      ${c.level}${T('). Predictions use the default settings; they\'ll sharpen once you\'ve finished a tournament of this type.')}</p>`;
+    return;
+  }
+  const errs = Object.entries(c.model_error_pct || {})
+    .sort((a, b) => a[1] - b[1])
+    .map(([k, v]) => `<tr><td>${MODEL_NAMES[k] || k}</td><td class="num">${v} %</td></tr>`).join('');
+  const exps = COMP.ranks.map(r =>
+    `<tr><td>Top ${r}</td><td class="num">${(c.exponent[r] ?? 0).toFixed(3)}</td></tr>`).join('');
+  box.innerHTML = `
+    <p class="small muted" style="margin-top:-8px">
+      ${T('Calibrated on')} <b>${c.n_comps}</b> ${T('finished competition(s) — scope:')} ${c.level}${T('. The more you finish, the tighter the predictions get.')}
+    </p>
+    <div class="row tight" style="align-items:flex-start">
+      <div style="flex:1 1 170px">
+        <h3>${T('Measured reliability')}</h3>
+        <table class="small"><tbody>${errs || '<tr><td class="muted">—</td></tr>'}</tbody></table>
+      </div>
+      <div style="flex:1 1 150px">
+        <h3>${T('Exponent per game')}</h3>
+        <table class="small"><tbody>${exps}</tbody></table>
+      </div>
+    </div>
+    <p class="small muted" style="margin-top:10px">
+      ${T('Reference game in this scoring:')} <b>${fmtNum(c.scale)}</b> ${T('Pts')} ${T('over the session. This is what lets the app estimate a tournament before the first reading, and carry the history over if the scoring changes.')}
+    </p>`;
+}
+
+/* ------------------------------ cycle ------------------------------ */
+function reload() {
+  return api('/api/competitions/' + COMP.id).then(c => {
+    Object.assign(COMP, c);
+    renderTable();
+    renderFinals();
+    renderStatus();
+    renderCountdown();
+    return api('/api/competitions/' + COMP.id + '/prediction');
+  }).then(p => {
+    PRED = p;
+    renderChart();
+    renderPredictions();
+    renderMe();
+    renderCalibration();
+  });
+}
+
+renderScoring();
+attachScoringPaste('placement', 'placement-hint', 'kill-pts');
+toggleSlot();
+renderStatus();
+renderCountdown();
+renderTable();
+reload();
+setInterval(renderCountdown, 30000);
+window.addEventListener('resize', () => renderChart());
+</script>
+{% endblock %}

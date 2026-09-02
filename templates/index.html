@@ -1,0 +1,179 @@
+{% extends "base.html" %}
+{% set active = 'comps' %}
+{% block content %}
+
+<div class="grid side">
+  <div>
+    <h1>{{ _("Competitions") }}</h1>
+
+    {% if not comps %}
+      <div class="card empty">{{ _("No competition yet. Create the first one on the right") }} &rarr;</div>
+    {% endif %}
+
+    {% for c in comps %}
+    <div class="card" style="padding:14px 16px">
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <a href="/competition/{{ c.id }}" style="font-weight:600;font-size:16px">{{ c.name }}</a>
+        <span class="tag accent">{{ c.region }}</span>
+        <span class="tag">{{ c.team_mode }}</span>
+        <span class="tag">{{ c.game_mode }}</span>
+        <span class="spacer"></span>
+        {% if c.stage %}<span class="tag">{{ c.stage }}</span>{% endif %}
+        {% if c.finished %}<span class="tag done">{{ _("finished") }}</span>{% endif %}
+        {% if c.finalised %}<span class="tag accent">{{ _("final results") }}</span>{% endif %}
+        <span class="tag {{ 'live' if c.n_snapshots else 'done' }}">{{ c.n_snapshots }} {{ _("measurement") }}{{ 's' if c.n_snapshots > 1 }}</span>
+        <button class="small danger" onclick="deleteComp({{ c.id }}, '{{ c.name|replace("'", "\\'") }}')">{{ _("Delete") }}</button>
+      </div>
+      <div class="small muted" style="margin-top:6px">
+        {{ c.start_time }} &rarr; {{ c.end_time or '?' }}
+      </div>
+      {% if c.thresholds %}
+      <div class="small mono" style="margin-top:8px;color:var(--muted)">
+        {% for rank, pts in c.thresholds|dictsort %}
+          Top {{ rank }} : <span style="color:var(--text)">{{ pts|round(0)|int }}</span>{{ '  ·  ' if not loop.last }}
+        {% endfor %}
+      </div>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+
+  <div class="card">
+    <h2>{{ _("New competition") }}</h2>
+    <form id="new-comp" onsubmit="return createComp(event)">
+      <div style="margin-bottom:12px">
+        <label>{{ _("Competition name") }}</label>
+        <input name="name" required placeholder="{{ _("e.g.") }} FNCS Divisional Cup - Round 2">
+      </div>
+      <div class="row" style="margin-bottom:12px">
+        <div>
+          <label>{{ _("Region") }}</label>
+          <select name="region">
+            {% for r in regions %}<option {{ 'selected' if r == 'EU' }}>{{ r }}</option>{% endfor %}
+          </select>
+        </div>
+        <div>
+          <label>{{ _("Mode") }}</label>
+          <select name="team_mode">
+            {% for m in team_modes %}<option>{{ m }}</option>{% endfor %}
+          </select>
+        </div>
+      </div>
+      <div class="row" style="margin-bottom:12px">
+        <div>
+          <label>{{ _("Match type") }}</label>
+          <select name="game_mode" id="game-mode" onchange="syncGameMinutes()">
+            {% for g in game_modes %}<option>{{ g }}</option>{% endfor %}
+          </select>
+        </div>
+        <div>
+          <label>{{ _("Points scoring") }}</label>
+          <select name="scoring_id">
+            <option value="">{{ _("— default —") }}</option>
+            {% for s in scorings %}<option value="{{ s.id }}">{{ s.name }}</option>{% endfor %}
+          </select>
+        </div>
+      </div>
+      <div class="row" style="margin-bottom:12px">
+        <div>
+          <label>{{ _("Start") }}</label>
+          <input type="datetime-local" name="start_time" value="{{ now }}" required>
+        </div>
+        <div>
+          <label>{{ _("End") }}</label>
+          <input type="datetime-local" name="end_time" value="{{ now }}">
+        </div>
+      </div>
+      <div style="margin-bottom:12px">
+        <label>{{ _("Tracked ranks (comma-separated)") }}</label>
+        <input name="ranks" value="{{ default_ranks|join(', ') }}">
+      </div>
+      <div class="row" style="margin-bottom:14px">
+        <div><label>{{ _("Game length") }} (min)</label>
+          <input type="number" step="any" name="game_minutes" id="game-minutes" value="30">
+        </div>
+        <div><label>{{ _("Tracker delay") }} (min)</label>
+          <input type="number" step="any" name="tracker_lag_min" value="{{ default_lag }}">
+        </div>
+        <div><label>{{ _("Number of games") }}</label>
+          <input type="number" name="max_games" value="{{ default_max_games }}">
+        </div>
+      </div>
+      <div class="row" style="margin-bottom:12px">
+        <div style="flex:2 1 200px"><label>{{ _("Game counting") }}</label>
+          <select name="games_mode" id="games-mode" onchange="toggleSlot()">
+            {% for key, label in games_modes.items() %}<option value="{{ key }}">{{ label }}</option>{% endfor %}
+          </select>
+        </div>
+        <div id="slot-wrap" class="hidden"><label>{{ _("Interval") }} (min)</label>
+          <input type="number" step="any" name="slot_minutes" id="slot-minutes" value="35">
+        </div>
+      </div>
+      <p class="small muted" style="margin:-6px 0 14px">
+        <b>{{ _("Maximum") }}</b> {{ _("for an open or a cash cup (everyone plays at their own pace),") }}
+        <b>{{ _("Sealed") }}</b> {{ _("for a final where games start at a fixed time.") }}
+        {{ _("The number of games feeds directly into the first threshold estimate.") }}
+      </p>
+      <button type="submit">{{ _("Create") }}</button>
+    </form>
+
+    <hr style="border:none;border-top:1px solid var(--line);margin:20px 0">
+    <h3>{{ _("Import a backup") }}</h3>
+    <input type="file" id="import-file" accept=".json" onchange="importJSON(this)">
+    <p class="small muted" style="margin:8px 0 0">
+      {{ _('JSON file produced by "Export JSON". Competitions are added to the existing ones.') }}
+    </p>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+const GAME_MINUTES = {{ game_minutes | tojson }};
+
+function syncGameMinutes() {
+  const mode = document.getElementById('game-mode').value;
+  if (GAME_MINUTES[mode]) document.getElementById('game-minutes').value = GAME_MINUTES[mode];
+}
+
+function toggleSlot() {
+  const sealed = document.getElementById('games-mode').value === 'sealed';
+  document.getElementById('slot-wrap').classList.toggle('hidden', !sealed);
+  if (sealed) {
+    document.getElementById('slot-minutes').value =
+      Number(document.getElementById('game-minutes').value || 30) + 5;
+  }
+}
+
+syncGameMinutes();
+toggleSlot();
+
+function createComp(ev) {
+  ev.preventDefault();
+  const f = new FormData(ev.target);
+  const data = Object.fromEntries(f.entries());
+  api('/api/competitions', 'POST', data).then(r => {
+    if (r.ok) location.href = '/competition/' + r.id;
+    else toast(r.error || T('Error'), true);
+  });
+  return false;
+}
+function deleteComp(id, name) {
+  if (!confirm(T('Delete "') + name + T('" and all its measurements?'))) return;
+  api('/api/competitions/' + id, 'DELETE').then(() => location.reload());
+}
+function importJSON(input) {
+  const file = input.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    api('/api/import', 'POST', JSON.parse(reader.result)).then(r => {
+      toast(r.ok ? r.imported + ' ' + T('competition(s) imported') : r.error, !r.ok);
+      if (r.ok) setTimeout(() => location.reload(), 800);
+    });
+  };
+  reader.readAsText(file);
+}
+</script>
+{% endblock %}
