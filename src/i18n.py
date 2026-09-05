@@ -235,6 +235,35 @@ FRENCH: dict[str, str] = {
     "One history per category and region.": "Un historique par catégorie et par région.",
     "No tournament with measurements yet.": "Aucun tournoi avec des relevés pour l'instant.",
 
+    # History page — search, filters and duplicates
+    "Search": "Recherche",
+    "Search — 'fncs div2' finds 'FNCS Division 2'":
+        "Rechercher — « fncs div2 » trouve « FNCS Division 2 »",
+    "Season": "Saison",
+    "Tag": "Étiquette",
+    "State": "État",
+    "Finished": "Terminés",
+    "Tracked": "Suivis",
+    "Missing scoring": "Sans barème",
+    "Missing field size": "Sans nombre d'équipes",
+    "Missing thresholds": "Sans paliers",
+    "and": "et",
+    "Clear filters": "Effacer les filtres",
+    "%s of %s": "%s sur %s",
+    "first %s shown — narrow the search": "%s premiers affichés — affine la recherche",
+    "Nothing matches those filters.": "Aucun tournoi ne correspond à ces filtres.",
+    "Deleted": "Supprimé",
+    "Source": "Source",
+    "1 pair looks like the same session entered twice":
+        "1 paire ressemble à la même session saisie deux fois",
+    "%s pairs look like the same session entered twice":
+        "%s paires ressemblent à la même session saisie deux fois",
+    "Same category, same hour, same thresholds. Keep the one that carries more.":
+        "Même catégorie, même heure, mêmes paliers. Garde celui qui porte le plus.",
+    "Delete this one": "Supprimer celui-ci",
+    "By category — apply a scoring or a field size to a whole block":
+        "Par catégorie — appliquer un barème ou une taille de champ à tout un bloc",
+
     # Scoring page
     "Scoring systems": "Barèmes de points",
     "My scoring systems": "Mes barèmes",

@@ -40,7 +40,11 @@ def load(path: str | None = None) -> list[dict]:
     exactly the objects `predict` and `calibration` see.
     """
     with connect(path) as conn:
-        return db.all_full(conn)
+        kept, dropped = db.keep_for_training(db.all_full(conn))
+    if dropped:
+        print(f"  {dropped} tournaments set aside by db.EXCLUDED "
+              f"(FNT_KEEP_EXCLUDED=1 to measure with them)")
+    return kept
 
 
 # --------------------------------------------------------------------------- #

@@ -1,0 +1,584 @@
+{% extends "base.html" %}
+{% set active = 'hist' %}
+{% block title %}{{ _("History") }} — Fortnite Comp Tracker{% endblock %}
+{% block content %}
+
+<h1>{{ _("History") }}</h1>
+
+<details class="card dupes hidden" id="dupes">
+  <summary><span id="dupes-count"></span></summary>
+  <div id="dupes-body"></div>
+</details>
+
+<div class="card">
+  <input id="q" class="search" autocomplete="off"
+         placeholder="{{ _("Search — 'fncs div2' finds 'FNCS Division 2'") }}">
+  <div id="facets"></div>
+  <div id="chosen" class="chosen hidden"></div>
+</div>
+
+<div class="card">
+  <div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:10px">
+    <h2 id="count" style="margin:0"></h2>
+    <span id="cut" class="small" style="color:var(--warn)"></span>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>{{ _("Tournament") }}</th>
+          <th>{{ _("Date") }}</th>
+          <th>{{ _("Category") }}</th>
+          <th>{{ _("Region") }}</th>
+          <th>{{ _("Mode") }}</th>
+          <th class="num">{{ _("Games") }}</th>
+          <th class="num">{{ _("Teams") }}</th>
+          <th class="num">{{ _("Thresholds") }}</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+</div>
+
+<datalist id="families">
+  {% for f in families %}<option value="{{ f }}">{% endfor %}
+</datalist>
+<datalist id="stages">
+  {% for s in stages %}{% if s %}<option value="{{ s }}">{% endif %}{% endfor %}
+</datalist>
+
+<details class="fold">
+  <summary>{{ _("By category — apply a scoring or a field size to a whole block") }}</summary>
+
+  {% if not views %}
+    <div class="card empty">{{ _("No tournament with measurements yet.") }}</div>
+  {% endif %}
+
+  {% for v in views %}
+  <div class="card">
+    <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:10px">
+      <h2 style="margin:0">{{ v.kind }}</h2>
+      <span class="tag accent">{{ v.region }}</span>
+      <span class="tag">{{ v.n }} {{ _("tournament") if v.n == 1 else _("tournaments") }}</span>
+      <span class="tag {{ 'live' if v.done else '' }}">{{ v.done }} {{ _("finished") }}{{ 's' if v.done > 1 and lang == 'fr' else '' }}</span>
+      <span class="spacer"></span>
+      {% if v.est_error is not none %}
+        <span class="small">{{ _("Starting estimate") }} : {{ _("average error") }}
+          <b style="color:{{ 'var(--ok)' if v.est_error <= 8 else 'var(--warn)' }}">{{ v.est_error }} %</b></span>
+      {% endif %}
+    </div>
+
+    {% if v.no_field %}
+    <div class="row tight" style="margin-bottom:8px;align-items:flex-end">
+      <span class="small" style="color:var(--warn);align-self:center">
+        {{ v.no_field }} {{ _("edition(s) without a team count — invisible to the model.") }}</span>
+      <span class="spacer"></span>
+      <div style="flex:0 1 150px"><label>{{ _("Ranked teams") }}</label>
+        <input type="number" class="cat-field" placeholder="{{ _("for this block") }}"></div>
+      <button class="small cat-field-apply"
+              data-family="{{ v.family }}" data-stage="{{ v.stage }}"
+              data-region="{{ v.region }}">{{ _("Apply to") }} {{ v.no_field }}</button>
+    </div>
+    {% endif %}
+
+    <div class="row tight" style="margin-bottom:10px;align-items:center">
+      {% if v.no_scoring %}
+        <span class="small" style="color:var(--warn)">
+          {{ v.no_scoring }} {{ _("tournament(s) without scoring — the API does not publish it.") }} {{ _("Once filled in, these editions teach the app to turn any scoring into points.") }}</span>
+      {% else %}
+        <span class="small muted">{{ _("Scoring system") }} :
+          <b>{{ v.scoring_name or _("set tournament by tournament") }}</b></span>
+      {% endif %}
+      <span class="spacer"></span>
+      <select class="cat-scoring" style="width:auto">
+        <option value="">— {{ _("pick a scoring") }} —</option>
+        {% for s in scorings %}
+          <option value="{{ s.id }}" {{ 'selected' if s.id == v.scoring_id }}>{{ s.name }}{% if s.team_mode or s.game_mode %} ({{ [s.team_mode, s.game_mode] | select | join(' · ') }}){% endif %}</option>
+        {% endfor %}
+      </select>
+      <button class="small cat-apply"
+              data-family="{{ v.family }}" data-stage="{{ v.stage }}"
+              data-region="{{ v.region }}">{{ _("Apply") }}</button>
+    </div>
+
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>{{ _("Tournament") }}</th><th>{{ _("Date") }}</th><th class="num">{{ _("Teams") }}</th>
+            <th class="num">{{ _("measurements") }}</th><th class="num">{{ _("Games") }}</th>
+            {% for r in v.ranks %}<th class="num">top {{ r }}</th>{% endfor %}
+            <th class="num">{{ _("Start est.") }}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for c in v.comps %}
+          <tr>
+            <td><a href="/tracking/{{ c.id }}">{{ c.name }}</a>{% if not c.done %}<span class="tag live" style="margin-left:6px">{{ _("live") }}</span>{% endif %}</td>
+            <td class="small muted">{{ c.date[:16] }}</td>
+            <td class="num {{ '' if c.field_size else 'warn-cell' }}">
+              {{ c.field_size or '—' }}</td>
+            <td class="num">{{ c.n_snapshots }}</td>
+            <td class="num muted">{{ c.max_games }}</td>
+            {% for r in v.ranks %}
+            <td class="num">{{ c.thresholds[r]|round(0)|int if c.thresholds.get(r) else '—' }}</td>
+            {% endfor %}
+            <td class="num">
+              {% if c.est_error is not none %}
+                <span style="color:{{ 'var(--ok)' if c.est_error <= 8 else 'var(--warn)' }}">{{ c.est_error }} %</span>
+              {% else %}<span class="muted">—</span>{% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  {% endfor %}
+</details>
+
+{% if scores|length > 1 %}
+<div class="card">
+  <h2>{{ _("Starting estimate error") }}</h2>
+  <div id="chart-first"></div>
+  <div class="table-wrap" style="margin-top:12px">
+    <table>
+      <thead><tr><th>{{ _("Tournament") }}</th><th>{{ _("Category") }}</th><th>{{ _("Date") }}</th>
+                 <th class="num">{{ _("History") }}</th><th class="num">{{ _("Error") }}</th></tr></thead>
+      <tbody>
+        {% for s in scores|reverse %}
+        <tr>
+          <td><a href="/tracking/{{ s.id }}">{{ s.name }}</a></td>
+          <td class="small muted">{{ s.kind }} · {{ s.region }}</td>
+          <td class="small muted">{{ s.date[:16] }}</td>
+          <td class="num muted">{{ s.n_comps }} {{ _("tournament(s)") }}</td>
+          <td class="num"><b style="color:{{ 'var(--ok)' if s.error_pct <= 8 else 'var(--warn)' }}">{{ s.error_pct }} %</b></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+/* The list, the facets and the duplicates arrive with the page rather than on a
+ * first request: a history page that opens on a spinner says nothing, and what
+ * a reader wants before they have typed anything is the most recent editions. */
+let FACETS = {{ facets | tojson }};
+let TOTAL = {{ total | tojson }};
+let GROUPS = {{ duplicates | tojson }};
+let ROWS = {{ initial | tojson }};
+let MATCHED = TOTAL;
+const PAGE = {{ page_size | tojson }};
+const STATES = {{ states | tojson }};
+
+/* Chips inside one row are an OR, one row against another an AND. Season and
+ * state are the exception and take a single value: the search accepts one of
+ * each, so a second click replaces rather than adds. */
+const PICKED = { region: [], game_mode: [], team_mode: [], tag: [] };
+let SEASON = '';
+let STATE = '';
+let QUERY = '';
+
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"]/g, ch =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
+}
+
+/* ---------------- filters ---------------- */
+const FACET_ROWS = [
+  ['region', T('Region')],
+  ['game_mode', T('Type')],
+  ['team_mode', T('Mode')],
+  ['season', T('Season')],
+  ['tag', T('Tag')],
+];
+
+// The tags themselves come from the data, but the states are a closed set the
+// search understands, so their wording lives here.
+const STATE_LABELS = {
+  finished: T('Finished'),
+  tracked: T('Tracked'),
+  no_scoring: T('Missing scoring'),
+  no_field: T('Missing field size'),
+  no_thresholds: T('Missing thresholds'),
+};
+
+const SINGLE = { season: true, state: true };
+
+function chosen(key) {
+  if (key === 'season') return SEASON ? [SEASON] : [];
+  if (key === 'state') return STATE ? [STATE] : [];
+  return PICKED[key];
+}
+
+function shown(key, value) {
+  return key === 'state' ? (STATE_LABELS[value] || value) : value;
+}
+
+function facetRow(key, label, items) {
+  const on = chosen(key);
+  const chips = items.map(([value, count]) => `
+    <button type="button" class="chip${on.includes(value) ? ' on' : ''}"
+            data-facet="${key}" data-value="${esc(value)}">${esc(shown(key, value))}${
+      count === null ? '' : `<span class="n">${count}</span>`}</button>`).join('');
+  return `<div class="facet${on.length ? ' on' : ''}">
+    <span class="facet-name">${esc(label)}${
+      !SINGLE[key] && on.length > 1 ? `<em class="any">${T('or')}</em>` : ''}</span>
+    <div class="chips">${chips}</div>
+  </div>`;
+}
+
+function renderFilters() {
+  const rows = FACET_ROWS.map(([key, label]) => {
+    const counts = FACETS[key] || {};
+    const items = Object.keys(counts).map(value => [value, counts[value]]);
+    // A filter nothing carries is not offered: an empty row is a dead end.
+    return items.length ? facetRow(key, label, items) : '';
+  });
+  rows.push(facetRow('state', T('State'), STATES.map(s => [s, null])));
+  document.getElementById('facets').innerHTML = rows.join('');
+  renderChosen();
+}
+
+/* What the reader has built, spelled out: values inside a row joined by "or",
+ * rows joined by "and". Each value drops out on a click, which is also what
+ * makes the rule visible without a paragraph explaining it. */
+function renderChosen() {
+  const terms = [];
+  if (QUERY) {
+    terms.push(`<span class="term">${T('Search')}
+      <b class="drop" data-facet="q" title="${T('Remove')}">${esc(QUERY)}</b></span>`);
+  }
+  FACET_ROWS.concat([['state', T('State')]]).forEach(([key, label]) => {
+    const on = chosen(key);
+    if (!on.length) return;
+    const values = on.map(value => `<b class="drop" data-facet="${key}"
+      data-value="${esc(value)}" title="${T('Remove')}">${esc(shown(key, value))}</b>`)
+      .join(` <i>${T('or')}</i> `);
+    terms.push(`<span class="term">${esc(label)} ${values}</span>`);
+  });
+  const box = document.getElementById('chosen');
+  box.classList.toggle('hidden', !terms.length);
+  box.innerHTML = terms.join(` <i class="op">${T('and')}</i> `)
+    + `<span class="spacer"></span>
+       <button type="button" class="ghost small" id="clear">${T('Clear filters')}</button>`;
+}
+
+function toggle(key, value) {
+  if (key === 'q') { QUERY = ''; document.getElementById('q').value = ''; }
+  else if (key === 'season') SEASON = SEASON === value ? '' : value;
+  else if (key === 'state') STATE = STATE === value ? '' : value;
+  else {
+    const list = PICKED[key];
+    const at = list.indexOf(value);
+    if (at < 0) list.push(value); else list.splice(at, 1);
+  }
+  renderFilters();
+  search();
+}
+
+function clearAll() {
+  Object.keys(PICKED).forEach(key => { PICKED[key].length = 0; });
+  SEASON = STATE = QUERY = '';
+  document.getElementById('q').value = '';
+  renderFilters();
+  search();
+}
+
+document.getElementById('facets').addEventListener('click', event => {
+  const chip = event.target.closest('.chip');
+  if (chip) toggle(chip.dataset.facet, chip.dataset.value);
+});
+
+document.getElementById('chosen').addEventListener('click', event => {
+  if (event.target.id === 'clear') return clearAll();
+  const drop = event.target.closest('.drop');
+  if (drop) toggle(drop.dataset.facet, drop.dataset.value);
+});
+
+/* ---------------- the search itself ---------------- */
+let timer = null;
+let ticket = 0;
+
+const searchBox = document.getElementById('q');
+searchBox.addEventListener('input', () => {
+  QUERY = searchBox.value.trim();
+  renderChosen();
+  clearTimeout(timer);
+  timer = setTimeout(search, 220);
+});
+
+function search() {
+  clearTimeout(timer);          // a chip clicked mid-word must not search twice
+  const query = new URLSearchParams();
+  if (QUERY) query.set('q', QUERY);
+  Object.entries(PICKED).forEach(([key, list]) => list.forEach(v => query.append(key, v)));
+  if (SEASON) query.set('season', SEASON);
+  if (STATE) query.set('state', STATE);
+  query.set('limit', PAGE);
+  // Typing fires several searches at once and they do not necessarily come back
+  // in order; without this an older answer lands last and the list disagrees
+  // with the box it came from.
+  const mine = ++ticket;
+  api('/api/history/search?' + query.toString()).then(r => {
+    if (mine !== ticket) return;
+    if (!r.ok) return toast(r.error || T('Error'), true);
+    ROWS = r.items;
+    MATCHED = r.matched;
+    renderRows();
+  });
+}
+
+/* ---------------- the list ---------------- */
+function line(c) {
+  const tags = (c.tags || []).map(t => `<span class="tag">${esc(t)}</span>`).join('');
+  return `<tr data-id="${c.id}">
+    <td><a href="/tracking/${c.id}">${esc(c.name)}</a>${
+      c.season ? ` <span class="tag accent">${esc(c.season)}</span>` : ''} ${tags}</td>
+    <td class="small muted">${esc((c.date || '').slice(0, 10))}</td>
+    <td class="small muted">${esc(c.kind)}</td>
+    <td class="small">${esc(c.region)}</td>
+    <td class="small muted">${esc(c.team_mode)} · ${esc(c.game_mode)}</td>
+    <td class="num muted">${c.max_games == null ? '—' : c.max_games}</td>
+    <td class="num${c.field_size ? '' : ' warn-cell'}">${
+      c.field_size ? fmtNum(c.field_size) : '—'}</td>
+    <td class="num${c.n_thresholds ? '' : ' warn-cell'}">${c.n_thresholds}</td>
+    <td class="right" style="white-space:nowrap">
+      <button class="ghost small" data-act="edit"
+              title="${T('Category and field size')}">${T('Edit')}</button>
+      <button class="danger small" data-act="del">${T('Delete')}</button>
+    </td>
+  </tr>`;
+}
+
+/* One string, one assignment: at five thousand tournaments a row built element
+ * by element, or carrying its own listener, is what makes the page crawl. */
+function renderRows() {
+  document.getElementById('count').textContent =
+    T('%s of %s').replace('%s', fmtNum(MATCHED)).replace('%s', fmtNum(TOTAL));
+  document.getElementById('cut').textContent = ROWS.length < MATCHED
+    ? T('first %s shown — narrow the search').replace('%s', fmtNum(ROWS.length)) : '';
+  document.getElementById('rows').innerHTML = ROWS.map(line).join('')
+    || `<tr><td colspan="9" class="empty">${T('Nothing matches those filters.')}</td></tr>`;
+}
+
+function closeEditor() {
+  const existing = document.getElementById('editor');
+  if (existing) existing.remove();
+}
+
+function openEditor(tr, id) {
+  const c = ROWS.find(x => x.id === id);
+  if (!c) return;
+  const already = document.getElementById('editor');
+  closeEditor();
+  if (already && Number(already.dataset.id) === id) return;   // the button also closes
+  const editor = document.createElement('tr');
+  editor.id = 'editor';
+  editor.dataset.id = id;
+  editor.innerHTML = `<td colspan="9">
+    <div class="row tight" style="align-items:flex-end">
+      <div style="flex:2 1 190px"><label>${T('Tournament')}</label>
+        <input id="ed-family" list="families" value="${esc(c.family)}"></div>
+      <div style="flex:1 1 140px"><label>${T('Stage')}</label>
+        <input id="ed-stage" list="stages" value="${esc(c.stage)}"
+               placeholder="${T('none')}"></div>
+      <div style="flex:1 1 130px"><label>${T('Ranked teams')}</label>
+        <input type="number" id="ed-field" value="${c.field_size || ''}"
+               placeholder="${T('required')}"></div>
+      <button class="small" data-act="save">${T('Save')}</button>
+      <button class="ghost small" data-act="cancel">${T('Cancel')}</button>
+    </div></td>`;
+  tr.after(editor);
+}
+
+function saveClass(id) {
+  api('/api/competitions/' + id + '/category', 'PUT', {
+    family: document.getElementById('ed-family').value,
+    stage: document.getElementById('ed-stage').value,
+    field_size: document.getElementById('ed-field').value,
+  }).then(r => {
+    if (!r.ok) return toast(r.error || T('Error'), true);
+    toast(T('Reclassified as "%s"').replace('%s', r.kind));
+    closeEditor();
+    refresh();
+  });
+}
+
+function removeComp(id) {
+  const c = ROWS.find(x => x.id === id) || { name: '#' + id };
+  if (!confirm(T('Delete "') + c.name + T('" and all its measurements?'))) return;
+  api('/api/competitions/' + id, 'DELETE').then(r => {
+    if (!r.ok) return toast(r.error || T('Error'), true);
+    toast(T('Deleted'));
+    forget(id);
+    refresh();
+  });
+}
+
+/* The row goes at once rather than when the reload comes back: the counts are
+ * corrected by the answers below, and a row that stays on screen after a
+ * confirmed delete reads as a failure. */
+function forget(id) {
+  ROWS = ROWS.filter(row => row.id !== id);
+  MATCHED = Math.max(0, MATCHED - 1);
+  TOTAL = Math.max(0, TOTAL - 1);
+  closeEditor();
+  renderRows();
+}
+
+// One listener for the whole list, editor row included: it is inside the same
+// body, so opening one adds no listener of its own.
+document.getElementById('rows').addEventListener('click', event => {
+  const btn = event.target.closest('button[data-act]');
+  if (!btn) return;
+  const tr = btn.closest('tr');
+  const id = Number(tr.dataset.id);
+  if (btn.dataset.act === 'edit') openEditor(tr, id);
+  else if (btn.dataset.act === 'del') removeComp(id);
+  else if (btn.dataset.act === 'save') saveClass(id);
+  else if (btn.dataset.act === 'cancel') closeEditor();
+});
+
+/* ---------------- duplicates ---------------- */
+const DUP_FIELDS = [
+  ['date', T('Date')],
+  ['region', T('Region')],
+  ['kind', T('Category')],
+  ['field_size', T('Ranked teams')],
+  ['n_thresholds', T('Thresholds')],
+  ['source', T('Source')],
+];
+
+function dupSide(comp, other) {
+  const lines = DUP_FIELDS.map(([key, label]) => {
+    const value = comp[key];
+    return `<div class="kv${String(value) === String(other[key]) ? '' : ' diff'}">
+      <span>${esc(label)}</span>
+      <b>${value === null || value === '' || value === undefined ? '—' : esc(value)}</b>
+    </div>`;
+  }).join('');
+  return `<div class="dup-side">
+    <a href="/tracking/${comp.id}">${esc(comp.name)}</a>
+    <div class="small muted">#${comp.id}</div>
+    ${lines}
+    <button class="danger small" style="margin-top:10px"
+            data-dup="${comp.id}">${T('Delete this one')}</button>
+  </div>`;
+}
+
+function renderDupes() {
+  const banner = document.getElementById('dupes');
+  banner.classList.toggle('hidden', !GROUPS.length);
+  if (!GROUPS.length) { banner.open = false; return; }
+  document.getElementById('dupes-count').textContent = GROUPS.length === 1
+    ? T('1 pair looks like the same session entered twice')
+    : T('%s pairs look like the same session entered twice').replace('%s', GROUPS.length);
+  document.getElementById('dupes-body').innerHTML = GROUPS.map(([a, b]) =>
+    `<div class="dup">${dupSide(a, b)}${dupSide(b, a)}</div>`).join('')
+    + `<p class="small muted">${T('Same category, same hour, same thresholds. Keep the one that carries more.')}</p>`;
+}
+
+document.getElementById('dupes-body').addEventListener('click', event => {
+  const btn = event.target.closest('button[data-dup]');
+  if (!btn) return;
+  const id = Number(btn.dataset.dup);
+  if (!confirm(T('Delete this one') + ' #' + id + ' ?')) return;
+  api('/api/competitions/' + id, 'DELETE').then(r => {
+    if (!r.ok) return toast(r.error || T('Error'), true);
+    toast(T('Deleted'));
+    forget(id);
+    refresh();
+  });
+});
+
+/* Counts, facets and duplicate pairs all move when a tournament goes, so a
+ * delete refreshes the three of them rather than the list alone. */
+function refresh() {
+  search();
+  api('/api/history/facets').then(r => {
+    if (!r.ok) return;
+    FACETS = r.facets;
+    TOTAL = r.total;
+    renderFilters();
+    renderRows();
+  });
+  api('/api/history/duplicates').then(r => {
+    if (!r.ok) return;
+    GROUPS = r.groups;
+    renderDupes();
+  });
+}
+
+renderFilters();
+renderRows();
+renderDupes();
+
+/* ---------------- by category, further down ---------------- */
+// Values travel through data- attributes: passing them straight into an onclick
+// broke the attribute the moment a name contained a quote, and the button went
+// dead with no error at all.
+document.querySelectorAll('.cat-field-apply').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const bloc = btn.closest('.row');
+    const taille = Number(bloc.querySelector('.cat-field').value);
+    if (!taille) return toast(T('Enter the number of teams.'), true);
+    btn.disabled = true;
+    api('/api/category/field', 'PUT', {
+      family: btn.dataset.family, stage: btn.dataset.stage,
+      region: btn.dataset.region, field_size: taille,
+    }).then(r => {
+      btn.disabled = false;
+      if (!r.ok) return toast(r.error || T('Error'), true);
+      toast(r.touched + ' ' + T('edition(s) completed'));
+      setTimeout(() => location.reload(), 1200);
+    });
+  });
+});
+
+document.querySelectorAll('.cat-apply').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const bloc = btn.closest('.row');
+    const id = Number(bloc.querySelector('.cat-scoring').value);
+    if (!id) return toast(T('Pick a scoring from the list.'), true);
+    btn.disabled = true;
+    api('/api/category/scoring', 'PUT', {
+      family: btn.dataset.family, stage: btn.dataset.stage,
+      region: btn.dataset.region, scoring_id: id, overwrite: true,
+    }).then(r => {
+      btn.disabled = false;
+      if (!r.ok) return toast(r.error || T('Error'), true);
+      if (r.warning) toast(r.warning, true);
+      const mesure = Object.entries(r.share_of_max || {})
+        .filter(([k]) => k).map(([k, v]) => `${k} : ${v.median} (${T('out of')} ${v.n})`).join(' · ');
+      toast(r.touched + ' ' + T('tournament(s) updated')
+            + (mesure ? ' — ' + T('measured ratio') + ' ' + mesure : ''));
+      setTimeout(() => location.reload(), 1600);
+    });
+  });
+});
+
+const SCORES = {{ scores | tojson }};
+if (SCORES.length > 1) {
+  drawChart(document.getElementById('chart-first'), {
+    series: [{
+      name: T('Starting estimate error') + ' (%)',
+      color: CHART_PALETTE[2],
+      points: SCORES.map((s, i) => ({ x: i, y: s.error_pct })),
+    }],
+    height: 240,
+    xTicks: SCORES.map((s, i) => i),
+    xFormat: v => (SCORES[Math.round(v)] || {}).date ? SCORES[Math.round(v)].date.slice(5, 10) : '',
+    yFormat: v => Math.round(v) + ' %',
+    emptyText: T('Not enough finished tournaments yet.'),
+  });
+}
+</script>
+{% endblock %}

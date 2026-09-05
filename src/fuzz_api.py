@@ -13,7 +13,9 @@ import tempfile
 # choose a database. The fuzzer writes — pointing it at real data loses data.
 if "FNT_DB_FUZZ" not in os.environ:
     _scratch = tempfile.mkdtemp(prefix="fuzz-")
-    _live = os.environ.get("FNT_DB", os.path.join("data", "tracker.db"))
+    _here = os.path.dirname(os.path.abspath(__file__))
+    _root = os.path.dirname(_here) if os.path.basename(_here) == "src" else _here
+    _live = os.environ.get("FNT_DB", os.path.join(_root, "data", "tracker.db"))
     _copy = os.path.join(_scratch, "tracker.db")
     if os.path.exists(_live):
         shutil.copy(_live, _copy)

@@ -18,10 +18,10 @@ Python 3.10 or later.
 
 ```bash
 pip install -r requirements.txt
-python app.py
+python src/app.py
 ```
 
-The browser opens on `http://127.0.0.1:5000`. On Windows: double-click **`run_windows.bat`**.
+The browser opens on `http://127.0.0.1:5000`. On Windows: double-click **`tracker.bat`**.
 
 On first launch, the app asks for your **Cito API key** — a free account at citoapi.com, 500
 requests a month. It's saved to `cito_key.txt`; keep it to yourself.
@@ -296,8 +296,8 @@ worth.
 ### Check that it's improving
 
 ```bash
-python backtest.py --learning-curve
-python backtest.py --learning-curve --stage Final
+python src/backtest.py --learning-curve
+python src/backtest.py --learning-curve --stage Final
 ```
 
 Replays your history in chronological order and shows the prediction error against how many
@@ -397,8 +397,8 @@ entered, or failing that if its last reading covers 90% of the session.
 ### Check reliability on your own data
 
 ```bash
-python backtest.py
-python backtest.py --region EU --team-mode Solo
+python src/backtest.py
+python src/backtest.py --region EU --team-mode Solo
 ```
 
 Replays every finished competition as if it had stopped at 15%, 25%, 50%, 75% and 90%, and
@@ -458,17 +458,18 @@ A script run every 10 minutes during the competition is enough; nothing else in 
 ## Files
 
 ```
-app.py           Flask server + JSON API
-cito.py          access to the Cito API (live tournaments, standings)
-tracking.py      importing a tournament and refreshing its tracking
-scoring_infer.py inferring the scoring table from the games
-db.py            SQLite data model
-predict.py       prediction models and personal tracking
-calibration.py   what the app learns from the history
-backtest.py      reliability and learning curve on your own tournaments
-cleanup.py       housekeeping in the folder (double-click: cleanup.bat)
-templates/       HTML pages
-static/          CSS + home-grown SVG chart engine
+update.bat, site.bat, harvest.bat, tracker.bat   the launchers, at the root
+src/app.py           Flask server + JSON API
+src/cito.py          access to the Cito API (live tournaments, standings)
+src/tracking.py      importing a tournament and refreshing its tracking
+src/scoring_infer.py inferring the scoring table from the games
+src/db.py            SQLite data model
+src/predict.py       prediction models and personal tracking
+src/calibration.py   what the app learns from the history
+src/backtest.py      reliability and learning curve on your own tournaments
+src/cleanup.py       housekeeping in the folder (double-click: src/cleanup.bat)
+src/templates/       HTML pages
+src/static/          CSS + home-grown SVG chart engine
 data/            your database and your archived tournaments
 ```
 

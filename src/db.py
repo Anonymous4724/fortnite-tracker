@@ -8,15 +8,18 @@ Model:
 from __future__ import annotations
 
 import json
+import re
 import os
 import sqlite3
+from collections import Counter
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 
-DB_PATH = os.environ.get(
-    "FNT_DB",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "tracker.db"),
-)
+HERE = os.path.dirname(os.path.abspath(__file__))
+# The code lives in `src/`, the data one level up in `data/`; a copy laid out
+# flat still works, which is what keeps a move from breaking anything.
+ROOT = os.path.dirname(HERE) if os.path.basename(HERE) == "src" else HERE
+DB_PATH = os.environ.get("FNT_DB", os.path.join(ROOT, "data", "tracker.db"))
 
 DEFAULT_RANKS = [1, 20, 50, 100, 500, 1000]
 
@@ -267,6 +270,21 @@ MIGRATIONS = [
     ("scoring_system", "game_mode", "TEXT NOT NULL DEFAULT ''"),
     ("competition", "family", "TEXT NOT NULL DEFAULT ''"),
     ("competition", "field_size", "INTEGER"),
+    # Who may enter, as Epic's requirement spells it ("ranked-br-combined:12"):
+    # the same cup admitting Unreal alone one week and Diamond upwards the
+    # next is two fields of different sizes, and the previous edition to read
+    # is the one with the same bar.
+    ("competition", "entry", "TEXT NOT NULL DEFAULT ''"),
+    # The three axes the sorting rests on, kept apart on purpose. The series is
+    # the recurring cup; the round is which session inside one running of it;
+    # the occurrence is which running. They used to be squeezed into one "stage"
+    # field, which is how two consecutive weeks of the same cup ended up in two
+    # different categories with one edition each.
+    ("competition", "series_key", "TEXT NOT NULL DEFAULT ''"),
+    ("competition", "season", "TEXT NOT NULL DEFAULT ''"),
+    ("competition", "occurrence", "INTEGER NOT NULL DEFAULT 0"),
+    ("competition", "round_no", "INTEGER NOT NULL DEFAULT 0"),
+    ("competition", "tags", "TEXT NOT NULL DEFAULT ''"),
 ]
 
 # Key/value settings, one row per key.
@@ -353,6 +371,14 @@ def init_db(path: str | None = None) -> None:
             conn.execute("UPDATE competition SET family = ?, "
                          "stage = CASE WHEN stage = '' THEN ? ELSE stage END WHERE id = ?",
                          (family, stage, row["id"]))
+        # Competitions written before the three axes existed carry them in one
+        # "stage" string. Reading it back out is what merges two consecutive
+        # weeks of the same cup, which used to sit in separate categories.
+        for row in conn.execute("SELECT id, name, family, stage FROM competition "
+                                "WHERE series_key = ''"):
+            comp = dict(row)
+            conn.execute("UPDATE competition SET series_key = ?, round_no = ? WHERE id = ?",
+                         (series_of(comp), round_of(comp), comp["id"]))
         # competitions from before inherit the game length of their mode
         for row in conn.execute("SELECT id, game_mode FROM competition"):
             conn.execute("UPDATE competition SET game_minutes = ? WHERE id = ? AND game_minutes = 30",
@@ -474,7 +500,8 @@ def update_competition(conn, comp_id: int, **fields) -> None:
                "ranks", "notes", "game_minutes", "tracker_lag_min", "max_games",
                "scoring", "scoring_accuracy", "finished_at", "games_mode", "slot_minutes",
                "event_id", "window_id", "source", "tracking", "confirmed_at", "qualifier",
-               "family", "stage", "field_size"}
+               "family", "stage", "field_size", "entry",
+               "series_key", "season", "occurrence", "round_no", "tags"}
     sets, values = [], []
     for key, value in fields.items():
         if key not in allowed:
@@ -544,6 +571,92 @@ def list_competitions(conn, region=None, team_mode=None, game_mode=None) -> list
             args.append(val)
     sql += " ORDER BY start_time DESC, id DESC"
     return [_row_to_comp(r) for r in conn.execute(sql, args)]
+
+
+# Exactly the columns the taxonomy reads: series_of, round_of, category_of and
+# category_key between them touch these and nothing else.
+CATALOGUE_COLUMNS = ("id", "name", "region", "team_mode", "game_mode", "start_time",
+                     "series_id", "stage", "family", "series_key", "round_no", "occurrence",
+                     "source")
+
+
+# Tournament families kept out of the training set, matched case-insensitively
+# against the family and the name.
+#
+# Ranked Cups are here because Epic runs one per ranked division and gives them
+# all the same title: "Duos Ranked Cup (Battle Royale)" is the name of the Gold
+# cup, the Elite cup and the Unreal cup alike. The division never reaches the
+# taxonomy, so every division lands in one category and its level becomes a
+# median over populations with nothing in common — a number that describes no
+# tournament anybody is about to play. Until the division can be read out of the
+# event, these teach the model noise.
+#
+# They stay in the database. This list decides what the model is *fitted* on,
+# not what is kept, so putting one back is a one-line edit and a re-export.
+# Set FNT_KEEP_EXCLUDED=1 to include them anyway, which is how the cost of
+# excluding them gets measured instead of assumed.
+EXCLUDED = ("ranked cup",)
+
+
+def is_excluded(comp) -> bool:
+    """Is this tournament kept out of the training set? See `EXCLUDED`."""
+    if os.environ.get("FNT_KEEP_EXCLUDED"):
+        return False
+    text = f"{comp.get('family') or ''} {comp.get('name') or ''}".lower()
+    return any(pattern in text for pattern in EXCLUDED)
+
+
+def keep_for_training(comps: list[dict]) -> tuple[list[dict], int]:
+    """(the tournaments the model learns from, how many were set aside)."""
+    kept = [c for c in comps if not is_excluded(c)]
+    return kept, len(comps) - len(kept)
+
+
+def suspicious_fields(comps) -> tuple[int, float] | None:
+    """(size, share) when the stored field sizes look like a harvest depth.
+
+    Every forecast the project makes is a function of `q = rank / field_size`, so
+    a field that records how many pages were downloaded rather than how many
+    teams were ranked is wrong everywhere while looking entirely healthy: the
+    tables fill, the checks pass, the numbers stay plausible. It surfaces only as
+    the model losing to a baseline that never reads the field at all.
+
+    Two conditions together, because either alone gives false alarms. Real cups
+    do repeat a popular size, so a common value proves nothing on its own; and
+    some genuine size has to be the largest. But a harvest cap is *both* the most
+    common size and the largest possible one — nothing can sit beyond the depth
+    that was fetched — and it holds a clear majority. Real fields never do that.
+    """
+    sizes = [int(c["field_size"]) for c in comps if c.get("field_size")]
+    if len(sizes) < 50:
+        return None
+    common, hits = Counter(sizes).most_common(1)[0]
+    share = hits / len(sizes)
+    if share > 0.5 and common == max(sizes):
+        return common, share
+    return None
+
+
+def catalogue(conn) -> list[dict]:
+    """Every competition, named and classified, with no JSON decoded.
+
+    `list_competitions` parses two JSON columns per row. That is nothing at
+    sixty-six tournaments and eighty per cent of a cross-validation at ten
+    thousand — twelve million `json.loads` calls to answer questions about
+    region and stage that never look at a scoring table.
+
+    The rows this returns carry no `scoring` and no `ranks` *keys at all*, so
+    code that wants them raises KeyError here instead of quietly reading a
+    string where it expected a dict. Use it to decide which competitions you
+    want, then load those with `get_competition_full`.
+    """
+    sql = f"SELECT {', '.join(CATALOGUE_COLUMNS)} FROM competition ORDER BY start_time DESC, id DESC"
+    out = []
+    for row in conn.execute(sql):
+        comp = dict(row)
+        comp["kind"] = category_of(comp)
+        out.append(comp)
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -1176,7 +1289,6 @@ KNOWN_STAGES = ["", "Qualifier", "Round 1", "Round 2", "Round 3",
 
 def split_name(name: str) -> tuple[str, str]:
     """(family, stage) proposed from the raw tournament name."""
-    import re
     text = (name or "").strip()
     stage = ""
     for pattern, template in STAGE_PATTERNS:
@@ -1197,22 +1309,239 @@ def split_name(name: str) -> tuple[str, str]:
     return text or (name or "Tournament").strip(), stage
 
 
-def category_of(comp) -> str:
-    """The category that groups editions comparable with one another.
+def normalise(text: str) -> str:
+    """Lowercase, unaccented, punctuation-free: a key, not a label."""
+    accents = str.maketrans("àâäáãçéèêëíìîïñóòôöõúùûüýÿ", "aaaaaceeeeiiiinooooouuuuyy")
+    text = (text or "").lower().translate(accents)
+    return re.sub(r"[^a-z0-9]+", "", text)
 
-    Takes a raw name (a proposal) or a competition (confirmed values). Two
-    editions of the same tournament and the same stage share a category; a
-    qualifier and a final do not.
+
+def series_of(comp) -> str:
+    """The recurring cup, free of season, region and edition.
+
+    Prefers the key the harvester read out of Epic's own event id, because that
+    is stable across renames and seasons. Falls back to the family name for
+    anything typed by hand.
     """
     if isinstance(comp, dict):
+        key = (comp.get("series_key") or "").strip()
+        if key:
+            return key
         family = (comp.get("family") or "").strip()
-        stage = (comp.get("stage") or "").strip()
         if not family:
-            family, auto = split_name(comp.get("name") or "")
-            stage = stage or auto
+            family = split_name(comp.get("name") or "")[0]
+        return normalise(family)
+    return normalise(split_name(comp)[0])
+
+
+def round_of(comp) -> int:
+    """Which session inside one running of the cup. 0 when there is only one.
+
+    A weekly cup played in a single session has no round, whatever the stage
+    label says: "Round 1" and "Qualifier" both mean "the one session there is",
+    and treating them as different rounds splits a category in half.
+    """
+    if not isinstance(comp, dict):
+        return 0
+    stored = comp.get("round_no")
+    if stored:
+        # A stored 1 collapses like a written "Round 1" does. Rows harvested
+        # before that rule reached the reader still carry it, and re-deriving
+        # them is a rebuild nobody should have to run to get their categories
+        # joined back up.
+        return 0 if int(stored) <= 1 else int(stored)
+    if comp.get("source") == "osirion":
+        # A harvested row's round came out of Epic's window id, the one field
+        # that says which session this is. Its stage *label* used to be read
+        # from Epic's `round` number, which is a week counter: "Week 2 Day 1"
+        # carried round 2 and was filed as a second round, one category per
+        # week. So for these rows the stored number is the whole truth and the
+        # label is not consulted — a zero means the cup has no rounds.
+        return 0
+    stage = (comp.get("stage") or "").strip().lower()
+    found = re.search(r"(?:round|manche|day|jour|week|semaine)\s*(\d+)", stage)
+    if found:
+        number = int(found.group(1))
+        return 0 if number <= 1 else number
+    if any(word in stage for word in ("final", "finale")):
+        return 9
+    if any(word in stage for word in ("semi", "demi")):
+        return 8
+    return 0
+
+
+ROUND_LABELS = {0: "", 8: "Semi-final", 9: "Final"}
+
+
+def round_label(number: int) -> str:
+    if number in ROUND_LABELS:
+        return ROUND_LABELS[number]
+    return f"Round {number}"
+
+
+def category_key(comp) -> tuple:
+    """What makes two tournaments the same thing for the model.
+
+    Series, round, region and both modes; seasons deliberately merged, so a cup
+    keeps accumulating editions across the year instead of restarting from one
+    every time Epic bumps the season number.
+    """
+    if not isinstance(comp, dict):
+        return (series_of(comp), 0, "", "", "")
+    return (series_of(comp), round_of(comp), comp.get("region") or "",
+            comp.get("team_mode") or "", comp.get("game_mode") or "")
+
+
+def category_of(comp) -> str:
+    """The same grouping, written for a person to read."""
+    if isinstance(comp, dict):
+        family = (comp.get("family") or "").strip()
+        if not family:
+            family = split_name(comp.get("name") or "")[0]
+        stage = round_label(round_of(comp))
     else:
-        family, stage = split_name(comp)
+        family, auto = split_name(comp)
+        stage = round_label(round_of({"stage": auto}))
     return f"{family} · {stage}" if stage else family
+
+
+NOISE_WORDS = {"cup", "cups", "tournament", "tournoi", "official", "the", "de",
+               "du", "des", "la", "le", "les", "event", "series", "serie"}
+
+
+def key_words(text: str) -> list[str]:
+    """The words of a name that carry meaning, folded for comparison."""
+    accents = str.maketrans("àâäáãçéèêëíìîïñóòôöõúùûüýÿ", "aaaaaceeeeiiiinooooouuuuyy")
+    folded = (text or "").lower().translate(accents)
+    # "div2" is two words typed as one; splitting letters from digits is what
+    # makes a search box forgiving without making it vague.
+    folded = re.sub(r"(?<=[a-z])(?=\d)|(?<=\d)(?=[a-z])", " ", folded)
+    return [w for w in re.split(r"[^a-z0-9]+", folded) if w and w not in NOISE_WORDS]
+
+
+def match_score(needle: str, haystack: str) -> float:
+    """How well a name answers a search. 0 means it does not.
+
+    Every word typed has to appear, but a prefix counts, so "fncs div2" finds
+    "FNCS Division 2". Digits must match whole - division 2 is not division 20.
+    The score is what puts the best answer first: a name that is mostly the
+    words you typed beats one that merely contains them somewhere.
+    """
+    wanted, have = key_words(needle), key_words(haystack)
+    if not wanted:
+        return 1.0
+    if not have:
+        return 0.0
+    hit = 0
+    for word in wanted:
+        if word.isdigit():
+            if word not in have:
+                return 0.0
+        elif not any(w.startswith(word) or (word.startswith(w) and len(w) >= 3) for w in have):
+            return 0.0
+        hit += 1
+    # Reward names that say little beyond what was asked for.
+    return hit / len(have)
+
+
+def search_competitions(conn, text: str = "", regions=None, team_modes=None,
+                        game_modes=None, tags=None, season: str = "",
+                        since: str = "", until: str = "", state: str = "",
+                        limit: int = 400) -> list[dict]:
+    """The history, narrowed the way a person would narrow it.
+
+    Everything is optional and everything combines. The text search is
+    deliberately forgiving, because nobody types a tournament's full name.
+    """
+    rows = [_row_to_comp(r) for r in conn.execute(
+        "SELECT * FROM competition ORDER BY start_time DESC, id DESC")]
+    out = []
+    for comp in rows:
+        if regions and comp["region"] not in regions:
+            continue
+        if team_modes and comp["team_mode"] not in team_modes:
+            continue
+        if game_modes and comp["game_mode"] not in game_modes:
+            continue
+        if season and (comp.get("season") or "").upper() != season.upper():
+            continue
+        if since and (comp["start_time"] or "") < since:
+            continue
+        if until and (comp["start_time"] or "") > until + " 23:59":
+            continue
+        if tags:
+            carried = set(json.loads(comp.get("tags") or "[]"))
+            if not carried.issuperset(tags):
+                continue
+        score = 1.0
+        if text:
+            score = max(match_score(text, comp["name"]),
+                        match_score(text, comp.get("family") or ""))
+            if score <= 0:
+                continue
+        comp["match"] = round(score, 3)
+        if state:
+            finals = conn.execute("SELECT COUNT(*) c FROM final_result "
+                                  "WHERE competition_id = ?", (comp["id"],)).fetchone()["c"]
+            if state == "finished" and not comp["finished"]:
+                continue
+            if state == "tracked" and not comp.get("tracking"):
+                continue
+            if state == "no_scoring" and comp["scoring_known"]:
+                continue
+            if state == "no_field" and comp.get("field_size"):
+                continue
+            if state == "no_thresholds" and finals:
+                continue
+        out.append(comp)
+    if text:
+        out.sort(key=lambda c: (-c["match"], c["start_time"] or ""), reverse=False)
+    return out[:limit]
+
+
+def find_duplicates(conn) -> list[list[dict]]:
+    """Competitions that look like the same session entered twice.
+
+    Same category and same hour is not enough on its own: an FNCS day runs
+    several sessions that share both, and merging them would throw away real
+    observations. What settles it is the results - a genuine re-entry has the
+    same thresholds, a second session does not.
+    """
+    groups: dict[tuple, list[dict]] = {}
+    for comp in list_competitions(conn):
+        key = category_key(comp) + ((comp["start_time"] or "")[:13],)
+        groups.setdefault(key, []).append(comp)
+
+    duplicates = []
+    for members in groups.values():
+        if len(members) < 2:
+            continue
+        results = {c["id"]: final_points(conn, c["id"]) for c in members}
+        for index, first in enumerate(members):
+            for second in members[index + 1:]:
+                shared = set(results[first["id"]]) & set(results[second["id"]])
+                if not shared:
+                    continue
+                same = all(abs(results[first["id"]][r] - results[second["id"]][r])
+                           <= 0.01 * max(results[first["id"]][r], 1) for r in shared)
+                if same:
+                    duplicates.append(sorted([first, second], key=lambda c: c["id"]))
+    return duplicates
+
+
+def facets(conn) -> dict:
+    """What there is to filter on, counted, so the page can offer only what exists."""
+    counted: dict[str, dict[str, int]] = {"region": {}, "team_mode": {}, "game_mode": {},
+                                          "season": {}, "tag": {}}
+    for comp in list_competitions(conn):
+        for field in ("region", "team_mode", "game_mode", "season"):
+            value = comp.get(field) or ""
+            if value:
+                counted[field][value] = counted[field].get(value, 0) + 1
+        for tag in json.loads(comp.get("tags") or "[]"):
+            counted["tag"][tag] = counted["tag"].get(tag, 0) + 1
+    return {name: dict(sorted(values.items(), key=lambda kv: (-kv[1], kv[0])))
+            for name, values in counted.items()}
 
 
 def get_objectives(conn, kind: str, region: str) -> list[dict]:

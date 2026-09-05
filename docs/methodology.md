@@ -5,6 +5,179 @@ Every number below is printed by a script in
 [`analysis/`](../analysis/README.md), named beside the claim; where one has no
 script behind it, I say so.
 
+---
+
+## Revision, September 2026 — the harvested training set
+
+Everything below this section was written for the original study: 66 tournaments and 290
+thresholds entered by hand. It is kept because it is how the curve was found and it is still
+right about the curve. The figures it quotes are superseded by these.
+
+### Data
+
+7,232 tournaments and 79,891 thresholds, every one read from Osirion's public Fortnite API:
+the calendar, each window's scoring rules, and the top 300 of each leaderboard, across eight
+regions and every format Epic ran from December 2025 to September 2026. Ranked Cups — 1,086
+of them — are set aside: Epic runs one per ranked division under one title, so their editions
+are not comparable and their category level describes no tournament anyone plays.
+
+Four defects in the harvest were found, three by the model losing to a baseline that does
+not use the defective field and one by reading the calendar the predictor shows, and each is
+now guarded against:
+
+- The field size recorded the harvest's depth, not the event's — 300 rosters for every
+  tournament. The model's only positional variable is `rank / field`. Now read from the
+  board's page count; refused at export when the sizes are flat.
+- Zero thresholds — teams that registered and never played — were stored, and a
+  multiplicative model cannot express them. Dropped.
+- Round 1 was read as a numbered stage from the window id and as no stage from the label, so
+  the same cup was split in two. Collapsed on both paths.
+- The name was the first line of Epic's two-line title, and the stage fell back on Epic's
+  `round` number. The first merged every cup that shares a first word — three FNCS divisions
+  under "FNCS", a weekly cup under "Fortnite" — and the second is a week counter, which filed
+  week 2 of a weekly cup as its "Round 2", one category per week. Both title lines now make
+  the name; the stage comes from the window id alone; the database carries the version of
+  these rules that built it and re-derives everything when they change. Under the corrected
+  names the previous-edition error went from 5.7 % to 5.0 % and its mean from 46 % to 12 %,
+  the category-median baseline from 8.4 % to 5.6 %, and the share of cold starts from 50 % to
+  53 % — some "previous editions" had been a different cup.
+
+The field remains censored at 9,950 rosters, the API's hundredth page.
+
+### The model, revised
+
+The single curve `level · exp(−a(q^b − q_ref^b))` is now the third of five rungs. Measured on
+the harvest it fits within 1.6 % near rank 20 and drifts to 16 % at rank 1 and 22 % past
+rank 110, with a systematic bias of +12 % at rank 1 — one exponent cannot bend enough for
+three decades of rank. A lookup table of what each rank was worth relative to rank 20, per
+category, halved that error (4.0 % against 9.2 %) and is rung 2. Rung 1 is the previous
+edition of the same cup at the same rank, read whole: a strong evening lifts every rank
+together, and any forecast that multiplies one edition's level by a ratio from other editions
+throws that correlation away. Rung 5, the scoring table alone, is keyed on the kind of cup,
+platform and stage rather than on game mode and team size only.
+
+Rung 4 was added when the name matching was tightened and a Reload final of twenty teams
+stopped borrowing, by accident, the previous edition of a differently named cup: without
+that accident it fell through to rung 5, whose anchor sits at rank 20 and whose curve is
+fitted on fields of thousands, and rank 5 came out at 1,667 points in a format where 300 is
+the most a team can score. Single-lobby finals now have their own table — every threshold
+of every such final in the training set, as a share of the most a team could score over
+the games played, by share of the lobby the rank is, per game mode and team size — read
+log-linearly between buckets, the last places left out because a team that left after two
+games is not a rung of the ladder. On the 103 such thresholds in the chronological sample
+the error went from 124 % to 13 % (6 % without one cup whose leaderboard records 100 points
+for every finalist), with 84 % inside the band.
+
+`analysis/shape.py` is the diagnostic that established all of this, with a negative and a
+positive control for each claim.
+
+Rung 1 learned two things from a Solo Victory Cup whose forecast opened at 156 and closed
+at 210. The previous edition had admitted Unreal players alone and drawn 21,000 of them;
+the cup coming up admitted Diamond upwards and drew 33,000, and rank 4,000 of 33,000 is a
+stronger team than rank 4,000 of 21,000. First, the entry bar is now read off Epic's
+`currentRanking:<ladder>:<n>` requirement and stored with every harvested edition
+(`competition.entry`; the older ladders stop at Unreal = 17, the "combined" ones split
+Elite and Champion in three and put Unreal at 21 — read off the catalogue, where a Diamond
+test cup asks 12 on both, the Elite ranked cups 15 on the old one, the Unreal cup 17 on the
+old one, and the Unreal-only week 21 on the combined one). The edition read is the last one
+with the same bar; when none exists the band widens by half. Second, a known field that is
+not the edition's moves the value along the curve: `exp(−a((r/F_now)^b − (r/F_then)^b))`,
+the quantile term alone. The first attempt took the ratio of two `shape_ratio`s, whose
+reference-rank term also moves with the field, and that ratio claims a smaller field lifts
+the top ranks; on the newest 600 tournaments read from the 6,632 before them, the 1,499
+rows where both fields are known counts (the API pages a board a hundred pages deep, so a
+harvested field of 9,900 or more is a ceiling, not a count) went from 6.3 % median error
+uncorrected to 8.2 % with that ratio. With the quantile term alone the same rows go to
+5.0 %, and to 4.7 % with the move capped at a fifth in log terms — the fitted slope of
+truth on move is 0.81, and beyond a fifth the curve extrapolates past where the data goes.
+Three-tenths of the move is added to the band in quadrature for the same reason. Over all
+warm rows the model's median went from 5.00 % to 4.17 %, and for the first time it beats
+the carry-forward baseline it is built on, by 0.83 points with the whole interval above
+zero.
+
+### Validation, revised
+
+Random leave-one-out was replaced by a forecasting split. The random split let the
+carry-forward baseline read the *nearest* edition in time — often next week's — and let the
+model read the newest editions in the database rather than the newest before the target. It
+is the standard mistake for a forecasting model and it biased the comparison in both
+directions. The newest 600 tournaments (from 25 July 2026) are now forecast from the 6,632
+before them; nothing sees the future.
+
+| | median error | n |
+|---|---:|---:|
+| cup has run before — model | **4.2 %** | 2,286 |
+| cup has run before — previous edition | 5.0 % | 2,286 |
+| cup has run before — category median | 5.6 % | 2,286 |
+| cup has never run — model, from the scoring table | 20 % | 2,794 |
+| single-lobby final never run — model, from the closed-lobby table | 13 % | 103 |
+
+The model is 0.8 points ahead of the previous edition read straight, an interval whose
+whole span is above zero (+0.47 to +1.34, P = 1.00), and 1.45 points ahead of the category
+median. Before the field move of rung 1 it *was* the previous edition wherever one existed
+at that rank — 5.0 % against 5.0 %, the tie noted in the earlier section — so the field is
+what separates the model from its own baseline. Band coverage is 85 % against a claimed
+80 %. (Before the naming fix the same split read 5.7 %, 5.7 %, 8.4 % and 19 %, with the
+model 2.7 points ahead of a category median that was being fed other cups' editions.)
+
+The first comparable edition is worth 8.6 points of median error; the next five are worth
+1.6 between them. The level is read from the previous edition alone: the median of the last
+three costs 0.3 points, of the last eight 1.0. Cups drift.
+
+These headline figures are written to `analysis/validation.json` by the validation and
+carried into `model.json` by the export, so the predictor quotes the measurement rather
+than a number typed into its source.
+
+### What would move the needle now
+
+1. The cold start, at 20 % on half of a new season's tournaments. A nearest-neighbour over
+   scoring table, field and games is the obvious candidate.
+2. The field ceiling. Cito's endpoint returns whole boards.
+3. The live refinement's blend. Its pace curve is now measured — `analysis/live.py` rebuilds
+   the standings of every harvested board at any moment from the per-game histories the API
+   returns, and on the first 44 boards a threshold at half the games sits at 0.50 of its
+   final value (p10–p90 0.46–0.55 at rank 5), open queues running linearly on the wall clock
+   and closed lobbies linearly on games played. The predictor scales its own cold ladder by
+   what the readings say against that curve and combines the two by precision. The first
+   version de-shaped readings through the open-queue curve and, in a twenty-team lobby where
+   that curve is five times too steep, turned 153 points at half time into 506.
+
+   How far a reading travels along the ladder is measured by the same replay. Write
+   `rho_r = observed_r / (share × final_r)` for the error the pace curve alone makes at rank
+   r, and regress `log rho_b` on `log rho_a` across boards. In an open queue the slope is
+   0.86 pooled and ~1.00 between any of ranks 3 to 25: the board moves as one, and a reading
+   anywhere prices everywhere. In a closed lobby it is 0.00 (correlation −0.09 over 20
+   boards): the same twenty teams share out a fixed pot, so a runaway leader takes the points
+   that would have landed at rank 10, and the ranks move independently. The predictor carries
+   the measured slope and nothing else, so a reading in a sealed final now refines its own
+   rank and leaves the rest of the ladder alone.
+
+   Two warnings on that measurement. The pooled slope is computed on ranks 1–25 only: with
+   one page of rosters read per board, rank 100 of a two-thousand-team cup is the last row
+   downloaded rather than the last row there is, and including it dragged the open-queue
+   slope from 0.86 to 0.34 on an artefact of harvest depth. And an earlier version of the
+   function centred each board on its own median, which removes exactly the common factor
+   being looked for and reported no carry anywhere — including for the open queues where it
+   is nearly perfect.
+
+   A rank read on both sides is priced between the two readings, log-linear in rank, before
+   any of that: the standings themselves are the evidence there. Measured on the harvest's
+   final boards, that interpolation is off by 1–3 % at the median between neighbouring
+   rungs down to the top 250 (100→120→250: 0.8 %; 50→100→250: 2.3 %) and 5–7 % deeper
+   (250→500→1000: 4.6 %, 100→250→1000: 7.3 %), with heavier tails where the field runs out.
+   The predictor gives such a rung the pace's own uncertainty plus 4 % per unit of log-gap
+   between the two readings, and marks it on the ladder. Before this, an unread rank between
+   two read ones took the cold ladder times the carried ratio, and in a mobile qualifier
+   with the top 100 read at 157 and the top 500 at 120 that priced the top 160 below the
+   top 500 (the ladder's monotone walk then pinned it to 120).
+
+   What is still unvalidated is the precision blend itself: the weights are principled, not
+   measured on held-out cups. On the one real test so far — a sealed final read at rank 5 at
+   half time — the blend landed 3.9 % from the final threshold where history alone was 14.0 %
+   out and the readings alone 6.3 % out. That is one tournament.
+
+---
+
 ## 1. The problem
 
 Fortnite tournaments pay out by rank: the top 500 qualify, the top 1,000 get the
@@ -118,6 +291,8 @@ which is where `1.255` and `0.370` came from. Nothing is broken; they are
 attenuated estimates, not the fit.
 
 ![Fitted curve against observed thresholds](../analysis/figures/curve.png)
+*Figure regenerated on the September 2026 harvest (`python -m analysis.figures`); the text of this section describes the original 66-tournament study.*
+
 
 ## 5. Validation
 
@@ -175,6 +350,8 @@ Too wide in the middle, about right in the tails — errors fatter-tailed than t
 normal the band assumes.
 
 ![Band calibration](../analysis/figures/coverage.png)
+*Figure regenerated on the September 2026 harvest (`python -m analysis.figures`); the text of this section describes the original 66-tournament study.*
+
 
 **More history helps, once.** On a balanced panel of 48 tournaments that all reach
 six peers, median error runs 8.40 % with no comparable edition, 6.14 % with one and
@@ -184,6 +361,8 @@ range — the band tightening as the anchor firms up, past four peers further th
 the errors justify.
 
 ![Learning curve](../analysis/figures/learning_curve.png)
+*Figure regenerated on the September 2026 harvest (`python -m analysis.figures`); the text of this section describes the original 66-tournament study.*
+
 
 ## 6. What the numbers are worth
 
@@ -236,6 +415,8 @@ data-entry artefacts.** They stay in because I have not verified them; dropping
 unverified inconvenient rows is how a backtest starts lying.
 
 ![Residual panel](../analysis/figures/residuals.png)
+*Figure regenerated on the September 2026 harvest (`python -m analysis.figures`); the text of this section describes the original 66-tournament study.*
+
 
 ## 7. What would move the needle, in order
 

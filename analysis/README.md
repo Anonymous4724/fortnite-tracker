@@ -16,7 +16,9 @@ python -m analysis.fit           # refit a and b, with honest intervals
 python -m analysis.diagnostics   # residuals, normality, clustering
 python -m analysis.validate      # leave-one-tournament-out vs two baselines
 python -m analysis.anchor        # is rank 20 the right rank to anchor on?
+python -m analysis.shape         # is the shape a function of rank, or rank/field?
 python -m analysis.figures       # PNG + SVG into analysis/figures/
+python -m analysis.live          # replay the boards game by game -> pace.json, carried into the model
 ```
 
 The database is opened read-only. `analysis.figures` takes about 35 seconds
@@ -39,7 +41,17 @@ else is a few seconds.
 | `diagnostics.py` | Where is the curve wrong? Residuals against fitted value, `q`, field size and date; normality; heteroskedasticity; and the intra-class correlation that tells you how much the naive standard errors understate. |
 | `validate.py` | Does it beat carrying last edition forward, or the category median? Leave-one-tournament-out over the whole pipeline, error by rank band, band coverage against the claimed 80 %, and error against the size of the history. |
 | `anchor.py` | Is rank 20 the right rank to read the level off? Dispersion of the pace between editions at each candidate rank, then the leave-one-tournament-out forecast re-run with the anchor moved, and a bootstrap on the margin. Also checks the figures `calibration.py`'s comments assert. |
+| `shape.py` | Is the ladder's shape a function of rank, or of rank divided by the field? The shipped form makes the whole shape's amplitude proportional to `(20/field)**b`, so a database whose field sizes all agree cannot tell the two apart — and one whose fields span two orders of magnitude can. Fits both readings with the same estimator on the same within-tournament gaps, and checks whether the residual still carries the field. |
 | `figures.py` | The four figures: fitted curve over the observed points, the residual panel, the coverage plot, the learning curve. |
+
+Above `validate.SAMPLE` tournaments the cross-validation replays a random sample
+rather than the whole database, and fits the curve on a second sample drawn
+disjoint from the first. The disjointness is the point: it means the expensive
+fit can be done once for the run instead of once per held-out tournament, while
+still guaranteeing that no tournament ever appears in the fit used to predict
+it. It also makes the measurement conservative — the app in use fits on
+everything, the backtest fits on 1,500. The seed is fixed, so the sample is the
+same every run and a disagreement is reproducible.
 
 ## What came out of it
 

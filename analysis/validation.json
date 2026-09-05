@@ -1,0 +1,30 @@
+{
+  "baselines": {
+    "carry": {
+      "median_ape": 5.0,
+      "model_better_by": 0.83
+    },
+    "median": {
+      "median_ape": 5.62,
+      "model_better_by": 1.45
+    },
+    "model": {
+      "median_ape": 4.17,
+      "model_better_by": null
+    }
+  },
+  "cold_median_ape": 19.98,
+  "cold_share": 0.548,
+  "coverage": 0.848,
+  "from": "2026-07-25",
+  "generated": "2026-09-05",
+  "lobby_median_ape": 13.31,
+  "lobby_rows": 103,
+  "mean_ape": 21.33,
+  "median_ape": 10.67,
+  "nominal": 0.8,
+  "pool": 6632,
+  "split": "chronological",
+  "targets": 600,
+  "thresholds": 5290
+}

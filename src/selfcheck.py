@@ -1,4 +1,10 @@
-"""One-shot check of everything before the folder goes to GitHub."""
+"""One-shot check of everything before the folder goes to GitHub.
+
+    python src/selfcheck.py
+
+Run from anywhere: the code is in `src/` and the research layer, the docs and
+the launchers one level up, and every path here is taken from this file's own.
+"""
 import io
 import os
 import re
@@ -6,6 +12,9 @@ import subprocess
 import sys
 
 OK, FAIL = [], []
+SRC = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(SRC) if os.path.basename(SRC) == "src" else SRC
+PY = sys.executable
 
 
 def check(name, condition, detail=""):
@@ -13,21 +22,22 @@ def check(name, condition, detail=""):
     print(f"  {'ok  ' if condition else 'FAIL'}  {name} {detail}")
 
 
-def run(cmd, timeout=600):
-    p = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
+def run(cmd, timeout=600, cwd=None):
+    p = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout,
+                       cwd=cwd or SRC)
     return p.returncode, p.stdout + p.stderr
 
 
 print("\n1. every module imports")
 for mod in ("app", "db", "calibration", "predict", "cito", "tracking", "team_stats",
-            "scoring_infer", "i18n", "backtest", "cleanup", "import_history",
-            "explore_history", "recompute_scoring", "check_forms",
-            "osirion", "harvest_osirion"):
-    code, out = run(f'python3 -c "import {mod}"')
+            "scoring_infer", "i18n", "backtest", "cleanup", "check_forms",
+            "osirion", "harvest_osirion", "calendar_snapshot", "export_model",
+            "refresh", "import_session", "pull_live"):
+    code, out = run(f'"{PY}" -c "import {mod}"')
     check(mod, code == 0, out.strip().splitlines()[-1] if code else "")
 
 print("\n2. every page answers, in both languages")
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, SRC)
 import app  # noqa: E402
 import db  # noqa: E402
 
@@ -64,36 +74,36 @@ check("/language/fr redirects and sets the cookie",
 
 print("\n4. the checks that ship with the repo")
 for name, cmd, needle in (
-    ("check_forms.py", "python3 check_forms.py", "Nothing gets lost"),
-    ("fuzz_api.py", "python3 fuzz_api.py", "server errors: 0"),
-    ("i18n.py", "python3 i18n.py", "0 missing"),
-    ("test_osirion.py", "python3 test_osirion.py", "answers are known"),
-    ("backtest.py", "python3 backtest.py", "competition"),
+    ("check_forms.py", f'"{PY}" check_forms.py', "Nothing gets lost"),
+    ("fuzz_api.py", f'"{PY}" fuzz_api.py', "server errors: 0"),
+    ("i18n.py", f'"{PY}" i18n.py', "0 missing"),
+    ("test_osirion.py", f'"{PY}" test_osirion.py', "answers are known"),
+    ("backtest.py", f'"{PY}" backtest.py', "competition"),
 ):
     code, out = run(cmd)
     check(name, needle in out, "" if needle in out else out.strip()[-140:])
 
-code, out = run("python3 cleanup.py --list")
+code, out = run(f'"{PY}" cleanup.py --list')
 # Caches are meant to be offered; anything else means a live file went missing
 # from the reachability walk.
 offered = [l.split("·")[1].split()[0] for l in out.splitlines() if l.strip().startswith("·")]
-check("cleanup.py --list offers only caches",
-      all(o.endswith("__pycache__") for o in offered), str(offered))
+check("cleanup.py --list offers only caches and interrupted downloads",
+      all(o.endswith(("__pycache__", ".part")) for o in offered), str(offered))
 
 print("\n5. the research layer")
-for mod in ("data", "fit", "diagnostics", "validate", "anchor"):
-    code, out = run(f"python3 -m analysis.{mod}", timeout=900)
+for mod in ("data", "fit", "diagnostics", "validate", "anchor", "shape"):
+    code, out = run(f'"{PY}" -m analysis.{mod}', timeout=900, cwd=ROOT)
     check(f"analysis.{mod}", code == 0, out.strip()[-120:] if code else "")
 
 print("\n6. no French left in the source")
 leaks = []
-for folder, names in (("", os.listdir(".")), ("templates/", os.listdir("templates")),
-                      ("static/", os.listdir("static"))):
+for folder, names in (("", os.listdir(SRC)), ("templates/", os.listdir(os.path.join(SRC, "templates"))),
+                      ("static/", os.listdir(os.path.join(SRC, "static")))):
     for name in names:
         path = folder + name
         if not path.endswith((".py", ".html", ".js")) or path == "i18n.py":
             continue
-        text = io.open(path, encoding="utf-8").read()
+        text = io.open(os.path.join(SRC, path), encoding="utf-8").read()
         for n, line in enumerate(text.splitlines(), 1):
             # db.py talks about French tournament names on purpose; that comment
             # says so in English and names the words it matches.
@@ -104,20 +114,23 @@ for folder, names in (("", os.listdir(".")), ("templates/", os.listdir("template
 check("comments are English", not leaks, str(leaks[:5]))
 
 print("\n7. nothing private, nothing secret")
-private = re.compile(r"stopk|C:\\\\Users|@gmail\.", re.I)
+# The account's own name, read from the machine rather than written here.
+_me = re.escape(os.path.basename(os.path.expanduser("~")) or "\x00")
+private = re.compile(_me + r"|C:\\\\Users|@gmail\.", re.I)
 found = []
-for root, dirs, names in os.walk("."):
+for root, dirs, names in os.walk(ROOT):
     dirs[:] = [d for d in dirs if d not in ("data", "__pycache__", ".git", "figures")]
     for name in names:
         if name.endswith((".py", ".html", ".js", ".md", ".bat", ".sh", ".txt")):
             path = os.path.join(root, name)
-            if path.endswith("selfcheck.py"):
-                continue                        # this file quotes the pattern itself
+            if path.endswith(("selfcheck.py", "tidy.py")):
+                continue                        # these quote the pattern themselves
             if private.search(io.open(path, encoding="utf-8", errors="ignore").read()):
                 found.append(path)
 check("no personal paths or addresses", not found, str(found))
 check("no key file in the tree",
-      not any(os.path.exists(f) for f in ("cito_key.txt", "cle_cito.txt")))
+      not any(os.path.exists(os.path.join(folder, f)) for folder in (ROOT, SRC)
+              for f in ("cito_key.txt", "cito_api_key.txt", "cle_cito.txt")))
 
 print("\n" + "=" * 68)
 print(f"  {len(OK)} checks passed, {len(FAIL)} failed")

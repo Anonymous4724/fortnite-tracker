@@ -8,9 +8,9 @@ version of the app left it behind.
 
 None of this touches the database, the Cito key, or the archived tournaments.
 
-    python cleanup.py           propose and ask for confirmation
-    python cleanup.py --list    show only, delete nothing
-    python cleanup.py --yes     delete without asking
+    python src/cleanup.py           propose and ask for confirmation
+    python src/cleanup.py --list    show only, delete nothing
+    python src/cleanup.py --yes     delete without asking
 """
 from __future__ import annotations
 
@@ -20,12 +20,21 @@ import re
 import shutil
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+# The code lives here in `src/`; the data, the launchers and the notes one
+# level up. A flat copy still works.
+ROOT = os.path.dirname(HERE) if os.path.basename(HERE) == "src" else HERE
+
+
+def where(rel: str) -> str:
+    """A path in the code folder, or in the repository for data/ and the launchers."""
+    return os.path.join(ROOT if rel.startswith("data/") or rel.endswith((".bat", ".sh")) else HERE, rel)
+
 
 # What actually gets launched directly — everything else has to be reachable from here.
-ENTRY_POINTS = ["app.py", "cleanup.py", "recompute_scoring.py", "backtest.py",
-                "explore_history.py", "import_history.py", "check_forms.py",
-                "fuzz_api.py", "selfcheck.py", "harvest_osirion.py", "export_model.py",
-                "test_osirion.py"]
+ENTRY_POINTS = ["app.py", "cleanup.py", "backtest.py", "check_forms.py", "fuzz_api.py",
+                "selfcheck.py", "harvest_osirion.py", "export_model.py",
+                "test_osirion.py", "calendar_snapshot.py", "refresh.py",
+                "import_session.py", "pull_live.py"]
 
 def always_keep() -> set[str]:
     """Launchers, notes, keys: kept even though no code imports them.
@@ -33,14 +42,22 @@ def always_keep() -> set[str]:
     Computed at runtime rather than hardcoded, so a new launcher or a new
     key file doesn't need to be declared here.
     """
-    keep = {"requirements.txt", ".gitignore", "LICENSE", "model.json"}
-    for name in os.listdir(HERE):
-        if os.path.isdir(os.path.join(HERE, name)):
-            continue
-        low = name.lower()
-        # "cle" catches cle_cito.txt, the key file name used before v8.
-        if low.endswith((".bat", ".sh", ".cmd", ".md")) or "key" in low or "cle" in low:
-            keep.add(name)
+    # Scripts nobody imports because they are run, not called. `reachable()`
+    # follows imports from the app's entry points, so a standalone tool is
+    # invisible to it and would be offered for deletion on every run.
+    keep = {"requirements.txt", ".gitignore", "LICENSE", "model.json",
+            "harvest_osirion.py", "calendar_snapshot.py", "refresh.py",
+            "selfcheck.py", "check_forms.py", "fuzz_api.py", "test_osirion.py",
+            "cleanup.py", "export_model.py", "backtest.py", "import_session.py",
+            "pull_live.py", "tidy.py"}
+    for folder in {HERE, ROOT}:
+        for name in os.listdir(folder):
+            if os.path.isdir(os.path.join(folder, name)):
+                continue
+            low = name.lower()
+            # "cle" catches cle_cito.txt, the key file name used before v8.
+            if low.endswith((".bat", ".sh", ".cmd", ".md")) or "key" in low or "cle" in low:
+                keep.add(name)
     return keep
 
 # Remnants identified from earlier stages of the project, with why they're gone.
@@ -55,6 +72,17 @@ LEGACY = [
     ("Demo data",
      "The --demo launch option was removed.",
      ["seed_demo.py"]),
+    ("Cito history import",
+     "The training set comes from the Osirion harvest now. These probed and "
+     "imported Cito's past tournaments, a few hundred requests at a time; the "
+     "harvest reads thousands for free. Cito stays for live standings only.",
+     ["import_history.py", "explore_history.py", "recompute_scoring.py",
+      "run_import_history.bat", "run_explore_history.bat",
+      "run_recompute_scoring.bat"]),
+    ("Superseded launchers",
+     "refresh.py does export, calendar and build in one; selfcheck runs the "
+     "form check.",
+     ["update_predictor.py", "update_predictor.bat", "run_check_forms.bat"]),
     ("French file names, from before v8",
      "Renamed in English when the project was published. The new names sit "
      "beside them; these are the leftovers.",
@@ -72,7 +100,7 @@ LEGACY = [
 PROTECTED = [
     ("data/tracker.db", "tournaments, readings, predictions, thresholds"),
     ("data/tournaments", "archived tournaments"),
-    ("cito_key.txt", "active API key"),
+    ("data/cle_cito.txt", "active API key"),
 ]
 
 
@@ -167,12 +195,28 @@ def human(size: float) -> str:
 def collect(paths):
     items, total = [], 0
     for rel in paths:
-        full = os.path.join(HERE, rel)
+        full = where(rel)
         if os.path.exists(full):
             size = size_of(full)
             items.append((rel, full, size))
             total += size
     return items, total
+
+
+def partial_downloads() -> list[str]:
+    """Pages the harvester was writing when it was stopped.
+
+    `harvest_osirion.save` writes each page to `<name>.part` and renames it
+    into place, so a Ctrl-C lands here and nowhere else. The next fetch of the
+    same page overwrites it; one that never comes leaves it behind.
+    """
+    root = os.path.join(ROOT, "data", "osirion")
+    found = []
+    for folder, _, files in os.walk(root):
+        for name in files:
+            if name.endswith(".part"):
+                found.append(os.path.relpath(os.path.join(folder, name), ROOT).replace("\\", "/"))
+    return sorted(found)
 
 
 def scan():
@@ -189,6 +233,12 @@ def scan():
             seen.update(rel for rel, _, _ in items)
             groups.append((title, why, items))
             total += size
+    parts, size = collect(partial_downloads())
+    if parts:
+        groups.append(("Interrupted downloads",
+                       "Half-written API pages; the harvester never reads them.",
+                       parts))
+        total += size
     extra, size = collect([p for p in orphans(reachable()) if p not in seen])
     if extra:
         groups.append(("Files no longer linked to the app",
@@ -211,7 +261,7 @@ def main() -> int:
     print("  KEPT NO MATTER WHAT")
     print("=" * 68)
     for rel, why in PROTECTED:
-        full = os.path.join(HERE, rel)
+        full = where(rel)
         state = human(size_of(full)) if os.path.exists(full) else "absent"
         print(f"  {rel:<24} {state:>9}   {why}")
     used = sorted(p for p in keep if os.path.exists(os.path.join(HERE, p)))

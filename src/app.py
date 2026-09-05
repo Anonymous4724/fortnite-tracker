@@ -2,7 +2,7 @@
 
 To run:
     pip install flask
-    python app.py
+    python src/app.py
 then open http://127.0.0.1:5000
 """
 from __future__ import annotations
@@ -537,7 +537,11 @@ def page_history():
         groups = {}
         for row in db.list_competitions(conn):
             comp = db.get_competition_full(conn, row["id"])
-            if not comp or not comp["snapshots"]:
+            # A harvested tournament has final results and no readings: nobody
+            # watched it live. Requiring a snapshot hid every one of them, and
+            # writing a fake snapshot equal to the final result — which an
+            # earlier import did — corrupts the live backtest instead.
+            if not comp or not (comp["snapshots"] or comp.get("finals")):
                 continue
             kind = db.category_of(comp)
             key = (kind, comp["region"])
@@ -595,10 +599,21 @@ def page_history():
 
     with db.session() as conn:
         scorings = db.list_scorings(conn)
+        # The list arrives rendered rather than fetched: the page has to say
+        # something on the first paint, and the most recent tournaments are the
+        # answer to the question nobody has typed yet.
+        found = db.search_competitions(conn, limit=WHOLE_HISTORY)
+        initial = [_search_row(conn, comp) for comp in found[:DEFAULT_SEARCH]]
+        counted = db.facets(conn)
+        duplicates = [[_duplicate_row(conn, comp) for comp in pair]
+                      for pair in db.find_duplicates(conn)]
     return render_template("history.html", views=views, scores=scores,
                            scorings=scorings,
                            families=sorted({c["family"] for c in known}),
-                           stages=db.KNOWN_STAGES)
+                           stages=db.KNOWN_STAGES,
+                           initial=initial, total=len(found), facets=counted,
+                           duplicates=duplicates, page_size=MAX_SEARCH,
+                           states=SEARCH_STATES)
 
 
 @app.route("/train")
@@ -742,6 +757,137 @@ def api_delete_manual_entry(comp_id: int):
     return jsonify({"ok": True, "items": items})
 
 
+# --------------------------------------------------------------------------- #
+# API - searching the history
+# --------------------------------------------------------------------------- #
+# The states a tournament can be filtered on, spelled the way db.search_competitions
+# reads them.
+SEARCH_STATES = ["finished", "tracked", "no_scoring", "no_field", "no_thresholds"]
+
+# What one search may hand back. Above this the answer stops being a list a
+# person reads and becomes a download, and narrowing is the point of the page.
+MAX_SEARCH = 5_000
+DEFAULT_SEARCH = 400
+
+# The history is scanned whole before anything is cut: the tag pass below drops
+# rows, and a limit applied before it would return a short page rather than the
+# first `limit` answers.
+WHOLE_HISTORY = 1_000_000
+
+
+def as_filters(values, label: str, allowed=None) -> list[str]:
+    """One row of filter chips, out of the query string.
+
+    The page sends `region=EU&region=NAC`; a link someone pasted sends
+    `region=EU,NAC`. Both spellings mean the same row, so both are read, and a
+    value outside the allowed set is named rather than silently matching nothing.
+    """
+    out: list[str] = []
+    for raw in values or []:
+        for part in str(raw).split(","):
+            value = (as_choice(part, label, allowed, default="") if allowed
+                     else as_text(part, label))
+            if value and value not in out:
+                out.append(value)
+    return out
+
+
+def as_day(value, label: str) -> str:
+    """A calendar day, `YYYY-MM-DD`.
+
+    Deliberately not `as_timestamp`: the search compares these against the
+    stored start times as text, and an hour appended to a window bound would
+    quietly move the window by a day.
+    """
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return ""
+    if not isinstance(value, str):
+        raise BadInput(f"'{label}' isn't a valid date: {_seen(value)}.")
+    try:
+        return db.norm_ts(value)[:10]
+    except ValueError:
+        raise BadInput(f"'{label}' isn't a valid date: {_seen(value)}.")
+
+
+def _search_row(conn, comp: dict) -> dict:
+    """One line of the history list.
+
+    Trimmed on purpose: a whole competition carries its scoring table, and
+    fifteen tiers repeated across a few thousand rows is megabytes the list
+    never looks at.
+    """
+    finals = db.final_points(conn, comp["id"])
+    return {"id": comp["id"], "name": comp["name"], "date": comp["start_time"],
+            "kind": db.category_of(comp), "family": comp.get("family") or "",
+            "stage": comp.get("stage") or "", "region": comp["region"],
+            "team_mode": comp["team_mode"], "game_mode": comp["game_mode"],
+            "season": comp.get("season") or "",
+            "tags": json.loads(comp.get("tags") or "[]"),
+            "max_games": comp.get("max_games"), "field_size": comp.get("field_size"),
+            "thresholds": finals, "n_thresholds": len(finals),
+            "finished": bool(comp.get("finished")), "tracking": bool(comp.get("tracking")),
+            "scoring_known": bool(comp.get("scoring_known")),
+            "source": comp.get("source") or "", "match": comp.get("match")}
+
+
+def _duplicate_row(conn, comp: dict) -> dict:
+    """One side of a suspected duplicate: enough of it to choose between the two."""
+    finals = db.final_points(conn, comp["id"])
+    return {"id": comp["id"], "name": comp["name"], "kind": db.category_of(comp),
+            "region": comp["region"], "date": comp["start_time"],
+            "field_size": comp.get("field_size"), "n_thresholds": len(finals),
+            "source": comp.get("source") or ""}
+
+
+@app.get("/api/history/search")
+def api_history_search():
+    """The history, narrowed the way a person narrows it: text, chips, dates, state."""
+    args = request.args
+    tags = as_filters(args.getlist("tag"), "Tag")
+    limit = as_int(args.get("limit"), "Limit", default=DEFAULT_SEARCH,
+                   minimum=1, maximum=MAX_SEARCH)
+    with db.session() as conn:
+        rows = db.search_competitions(
+            conn,
+            text=as_text(args.get("q"), "Search"),
+            regions=as_filters(args.getlist("region"), "Region", db.REGIONS),
+            team_modes=as_filters(args.getlist("team_mode"), "Mode", db.TEAM_MODES),
+            game_modes=as_filters(args.getlist("game_mode"), "Type", db.GAME_MODES),
+            season=as_text(args.get("season"), "Season"),
+            since=as_day(args.get("since"), "From"),
+            until=as_day(args.get("until"), "To"),
+            state=as_choice(args.get("state"), "State", SEARCH_STATES, default=""),
+            limit=WHOLE_HISTORY)
+        # A row carrying any of the chosen tags answers, the way any other row of
+        # chips answers. db.search_competitions asks a row to carry all of them,
+        # which is a different question, so the tags are settled here instead.
+        if tags:
+            wanted = set(tags)
+            rows = [row for row in rows
+                    if wanted & set(json.loads(row.get("tags") or "[]"))]
+        items = [_search_row(conn, comp) for comp in rows[:limit]]
+    return jsonify({"ok": True, "items": items, "n": len(items),
+                    "matched": len(rows), "limit": limit})
+
+
+@app.get("/api/history/facets")
+def api_history_facets():
+    """What there is to filter on, counted, so the page offers only what exists."""
+    with db.session() as conn:
+        counted = db.facets(conn)
+        total = len(db.list_competitions(conn))
+    return jsonify({"ok": True, "facets": counted, "total": total})
+
+
+@app.get("/api/history/duplicates")
+def api_history_duplicates():
+    """Pairs that look like the same session entered twice."""
+    with db.session() as conn:
+        groups = [[_duplicate_row(conn, comp) for comp in pair]
+                  for pair in db.find_duplicates(conn)]
+    return jsonify({"ok": True, "groups": groups, "n": len(groups)})
+
+
 @app.post("/api/estimate")
 def api_estimate():
     """Cold estimate of one threshold, saving nothing."""
@@ -829,7 +975,7 @@ def api_add_history():
 def _cold_estimate(conn, sample: dict, ranks: list[int]) -> dict:
     """Cold estimate for a stand-in tournament of this category."""
     history, scope, _ = calibration.comparable_history(conn, db, sample, exclude_id=-1)
-    calib = calibration.calibrate(history, ranks, wide=db.all_full(conn))
+    calib = calibration.calibrate(history, ranks, broad=calibration.shared_broad(conn, db))
     out = {"scope": scope, "n_comps": calib.get("n_comps", 0), "ranks": {}, "reason": None}
     for rank in ranks:
         guess = calibration.prior_prediction(sample, calib, rank)
@@ -1399,9 +1545,12 @@ def api_category_scoring():
                     warning = (f"This scoring table is marked {source['game_mode']} while the "
                                f"category is {game}.")
         calibration.invalidate(conn)
-        wide = db.all_full(conn)
-        calib = calibration.calibrate(wide, [], wide=wide)
-        part = (calib.get("reference_pace") or {}).get("share_of_max") or {}
+        # Only the scoring-to-points bridge is wanted here. Calibrating the whole
+        # database against itself would also cross-validate every live model
+        # against every other tournament — quadratic work, discarded on the next
+        # line.
+        broad = calibration.shared_broad(conn, db)
+        part = (broad.get("reference_pace") or {}).get("share_of_max") or {}
     return jsonify({"ok": True, "touched": touched, "share_of_max": part,
                     "warning": warning})
 

@@ -9,7 +9,7 @@ The approach: for every form, send a recognizable value into **every** field,
 then read the database back and demand all of them turn up. A field lost
 along the way fails the check instead of slipping through unnoticed.
 
-    python check_forms.py
+    python src/check_forms.py
 """
 from __future__ import annotations
 

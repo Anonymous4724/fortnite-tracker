@@ -5,8 +5,8 @@ For each finished competition we pretend the session stopped at 15 %, 25 %,
 only the snapshots available at that point, and compare it against the
 threshold the tournament actually ended on.
 
-    python backtest.py
-    python backtest.py --region EU --team-mode Solo
+    python src/backtest.py
+    python src/backtest.py --region EU --team-mode Solo
 """
 from __future__ import annotations
 

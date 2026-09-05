@@ -17,11 +17,11 @@ Il faut Python 3.10 ou plus.
 
 ```bash
 pip install -r requirements.txt
-python app.py
+python src/app.py
 ```
 
 Le navigateur s'ouvre sur `http://127.0.0.1:5000`. Sous Windows : double-clic sur
-**`run_windows.bat`**.
+**`tracker.bat`**.
 
 Au premier lancement, l'app demande ta **clé API Cito** — compte gratuit sur citoapi.com,
 500 requêtes par mois. Elle est enregistrée dans `cito_key.txt`, à garder pour toi.
@@ -293,8 +293,8 @@ une équipe en forme suffit à déplacer le seuil. Le détail est dans `docs/met
 ### Vérifier que ça s'améliore
 
 ```bash
-python backtest.py --learning-curve
-python backtest.py --learning-curve --stage Final
+python src/backtest.py --learning-curve
+python src/backtest.py --learning-curve --stage Final
 ```
 
 Rejoue ton historique dans l'ordre chronologique et affiche l'erreur de prédiction selon le nombre de
@@ -396,8 +396,8 @@ définitifs sont saisis, ou à défaut si son dernier relevé couvre 90 % de la 
 ### Vérifier la fiabilité sur tes propres données
 
 ```bash
-python backtest.py
-python backtest.py --region EU --team-mode Solo
+python src/backtest.py
+python src/backtest.py --region EU --team-mode Solo
 ```
 
 Rejoue chaque compétition terminée comme si elle s'arrêtait à 15 %, 25 %, 50 %, 75 % et 90 %, et
@@ -455,17 +455,18 @@ Un script lancé toutes les 10 minutes pendant la compétition suffit ; le reste
 ## Fichiers
 
 ```
-app.py           serveur Flask + API JSON
-cito.py          accès à l'API Cito (tournois en direct, classements)
-tracking.py      import d'un tournoi et rafraîchissement du suivi
-scoring_infer.py déduction du barème à partir des parties
-db.py            modèle de données SQLite
-predict.py       modèles de prédiction et suivi personnel
-calibration.py   ce que l'app apprend de l'historique
-backtest.py      fiabilité et courbe d'apprentissage sur tes tournois
-cleanup.py       ménage dans le dossier (double-clic : cleanup.bat)
-templates/       pages HTML
-static/          CSS + moteur de graphiques SVG maison
+update.bat, site.bat, harvest.bat, tracker.bat   les lanceurs, à la racine
+src/app.py           serveur Flask + API JSON
+src/cito.py          accès à l'API Cito (tournois en direct, classements)
+src/tracking.py      import d'un tournoi et rafraîchissement du suivi
+src/scoring_infer.py déduction du barème à partir des parties
+src/db.py            modèle de données SQLite
+src/predict.py       modèles de prédiction et suivi personnel
+src/calibration.py   ce que l'app apprend de l'historique
+src/backtest.py      fiabilité et courbe d'apprentissage sur tes tournois
+src/cleanup.py       ménage dans le dossier (double-clic : src/cleanup.bat)
+src/templates/       pages HTML
+src/static/          CSS + moteur de graphiques SVG maison
 data/            ta base et tes tournois archivés
 ```
 

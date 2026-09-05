@@ -28,8 +28,12 @@ from datetime import datetime, timezone
 BASE = "https://api.citoapi.com/api/v1/fortnite"
 TIMEOUT = 25
 HERE = os.path.dirname(os.path.abspath(__file__))
-KEY_FILES = [os.path.join(HERE, "cito_key.txt"),
-             os.path.join(HERE, "cle_cito.txt")]  # older installs
+ROOT = os.path.dirname(HERE) if os.path.basename(HERE) == "src" else HERE
+# The key lives in data/ (never committed); the folder root and the code's own
+# folder are read too, for installs that put it there before.
+KEY_FILES = [os.path.join(folder, name)
+             for folder in (os.path.join(ROOT, "data"), ROOT, HERE)
+             for name in ("cito_key.txt", "cle_cito.txt", "cito_api_key.txt")]
 
 FREE_QUOTA = 500          # requests per month on Cito's free tier
 

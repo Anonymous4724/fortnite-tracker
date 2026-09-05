@@ -3,14 +3,23 @@
     python -m analysis.figures            # all four, into analysis/figures/
     python -m analysis.figures curve      # just one
 
-Everything lands in `analysis/figures/`. The learning curve refits the pipeline a
-few thousand times and takes about half a minute; the other three are instant.
+Everything lands in `analysis/figures/`. On the full harvest the coverage
+figure replays a few hundred tournaments and the learning curve refits the
+pipeline for each of them at every history size: count on a few minutes.
+
+Scatter layers are rasterised inside the SVG. Sixty thousand points as vector
+circles made a 48 MB file that no browser wanted to open; the axes, text and
+lines stay crisp, the dots become an embedded image.
 """
 from __future__ import annotations
 
 import math
 import os
 import sys
+
+from analysis import _require
+
+_require("matplotlib")                     # the only script here that needs it
 
 import matplotlib
 
@@ -21,9 +30,16 @@ import numpy as np
 from scipy import stats
 
 import calibration
+import export_model
 from analysis import data, diagnostics, fit, validate
 
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "figures")
+
+# Beyond this many times the reference level the curve figure stops drawing
+# points and counts them instead: a handful of boards with twenty entrants and
+# a 1-point rank 20 would otherwise push the axis to 11 and flatten the other
+# sixty thousand observations into a stripe.
+CURVE_Y_CAP = 3.0
 
 # Categorical slots, taken in fixed order and never cycled. Three is the cap for
 # scatter-type plots where any pair can end up adjacent.
@@ -58,6 +74,20 @@ def _tidy(ax, title: str, xlabel: str, ylabel: str) -> None:
         ax.spines[side].set_visible(False)
 
 
+def shipped_curve() -> tuple[tuple[float, float], str]:
+    """The curve the site runs on, and what to call it in a legend.
+
+    `model.json` is what the export last wrote and what the predictor loads;
+    the constant in `calibration` is only the cold fallback for a database too
+    small to fit. Showing the fallback as "shipped" is how a figure ends up
+    contradicting the site it illustrates.
+    """
+    curve = export_model.previous_curve()
+    if curve and "a" in curve and "b" in curve:
+        return (float(curve["a"]), float(curve["b"])), "shipped (model.json)"
+    return calibration.CURVE_DEFAULT, "fallback default (no model.json yet)"
+
+
 # --------------------------------------------------------------------------- #
 def figure_curve(comps=None) -> None:
     """Fitted shape over the observed thresholds.
@@ -82,24 +112,33 @@ def figure_curve(comps=None) -> None:
     sub["shape"] = (sub["threshold"] / sub["level"]) * np.exp(-a * sub["q_ref"] ** b)
 
     grid = np.logspace(math.log10(sub["q"].min() * 0.8), math.log10(sub["q"].max() * 1.2), 300)
+    shown = sub[sub["shape"] <= CURVE_Y_CAP]
+    above = len(sub) - len(shown)
+    deep = int((sub["q"] > 0.25).sum())
+
     fig, ax = plt.subplots(figsize=(7.2, 4.4))
-    ax.scatter(sub["q"], sub["shape"], s=26, color=BLUE, alpha=0.55,
-               edgecolors="white", linewidths=0.6, zorder=3,
+    ax.scatter(shown["q"], shown["shape"], s=14, color=BLUE, alpha=0.35,
+               edgecolors="white", linewidths=0.4, zorder=3, rasterized=True,
                label=f"observed thresholds (n = {len(sub)}, "
                      f"{sub['competition_id'].nunique()} tournaments)")
     ax.plot(grid, np.exp(-a * grid ** b), color=BLUE, zorder=4,
             label=f"refitted  a = {a:.3f}, b = {b:.3f}")
-    ha, hb = calibration.CURVE_DEFAULT
+    (ha, hb), shipped_label = shipped_curve()
     ax.plot(grid, np.exp(-ha * grid ** hb), color=ORANGE, linestyle="--", zorder=4,
-            label=f"shipped   a = {ha}, b = {hb}")
+            label=f"{shipped_label}  a = {ha:.3f}, b = {hb:.3f}")
     ax.set_xscale("log")
+    ax.set_ylim(0, CURVE_Y_CAP)
     _tidy(ax, "Threshold shape against depth in the standings",
           "q = rank / field size (log scale)",
           "share of the tournament's level,\nnormalised to a common reference")
-    ax.legend(loc="lower left")
-    ax.annotate("11 of 225 observations sit beyond q = 0.25;\n"
-                "the exponent is fitted almost entirely on the left",
-                xy=(0.985, 0.97), xycoords="axes fraction", ha="right", va="top",
+    ax.legend(loc="lower left")     # the only empty corner: nothing is cheap and deep
+    note = (f"{deep} of {len(sub)} observations ({100 * deep / len(sub):.0f} %) sit "
+            f"beyond q = 0.25")
+    if above:
+        note += (f";\n{above} sit above {CURVE_Y_CAP:g} and are not drawn — boards "
+                 f"of a few dozen entrants\nwhere rank {calibration.REFERENCE_RANK} "
+                 f"is worth a handful of points")
+    ax.annotate(note, xy=(0.015, 0.97), xycoords="axes fraction", ha="left", va="top",
                 fontsize=8, color=MUTED)
     save(fig, "curve")
 
@@ -111,7 +150,8 @@ def figure_residuals(comps=None) -> None:
     r = df["residual"]
 
     fig, axes = plt.subplots(2, 3, figsize=(12.4, 6.6))
-    scatter = dict(s=20, color=BLUE, alpha=0.55, edgecolors="white", linewidths=0.5, zorder=3)
+    scatter = dict(s=12, color=BLUE, alpha=0.35, edgecolors="white", linewidths=0.4,
+                   zorder=3, rasterized=True)
 
     for ax, (col, label, logx) in zip(
             axes.flat,
@@ -136,7 +176,8 @@ def figure_residuals(comps=None) -> None:
     ax = axes.flat[5]
     stats.probplot(r, dist="norm", plot=ax)
     ax.get_lines()[0].set(marker="o", markersize=3.5, markerfacecolor=BLUE,
-                          markeredgecolor="white", markeredgewidth=0.4, linestyle="none")
+                          markeredgecolor="white", markeredgewidth=0.4, linestyle="none",
+                          rasterized=True)
     ax.get_lines()[1].set(color=ORANGE, linewidth=1.4)
     ax.set_title("")            # probplot writes its own centre title; ours is on the left
     norm = diagnostics.normality(r)
