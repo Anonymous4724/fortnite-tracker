@@ -285,6 +285,13 @@ MIGRATIONS = [
     ("competition", "occurrence", "INTEGER NOT NULL DEFAULT 0"),
     ("competition", "round_no", "INTEGER NOT NULL DEFAULT 0"),
     ("competition", "tags", "TEXT NOT NULL DEFAULT ''"),
+    # How many pages the board had when the feed read it - a hundred rosters
+    # a page - so how many had played by then: the cup's arrival, minute by
+    # minute, beside its points.
+    ("snapshot", "pages", "INTEGER"),
+    # ... and the exact count of rosters ranked, where the feed read the last
+    # page as well; absent at the API's ceiling of a hundred pages.
+    ("snapshot", "ranked", "INTEGER"),
 ]
 
 # Key/value settings, one row per key.
@@ -663,13 +670,15 @@ def catalogue(conn) -> list[dict]:
 # Snapshots
 # --------------------------------------------------------------------------- #
 def add_snapshot(conn, comp_id: int, ts=None, points: dict | None = None, note="",
-                 games=None, my_points=None) -> int:
+                 games=None, my_points=None, pages=None, ranked=None) -> int:
     ts = norm_ts(ts)
     cur = conn.execute(
-        "INSERT INTO snapshot (competition_id, ts, note, games, my_points) VALUES (?,?,?,?,?)",
+        "INSERT INTO snapshot (competition_id, ts, note, games, my_points, pages, ranked) VALUES (?,?,?,?,?,?,?)",
         (comp_id, ts, note or "",
          int(games) if games not in (None, "") else None,
-         float(my_points) if my_points not in (None, "") else None),
+         float(my_points) if my_points not in (None, "") else None,
+         int(pages) if pages not in (None, "", 0) else None,
+         int(ranked) if ranked not in (None, "", 0) else None),
     )
     sid = cur.lastrowid
     set_points(conn, sid, points or {})
@@ -755,6 +764,31 @@ def set_finals(conn, comp_id: int, points: dict) -> None:
 def get_finals(conn, comp_id: int) -> dict[int, float]:
     return {int(r["rank"]): r["points"] for r in conn.execute(
         "SELECT rank, points FROM final_result WHERE competition_id = ? ORDER BY rank", (comp_id,))}
+
+
+def add_finals_missing(conn, comp_id: int, points: dict) -> list[int]:
+    """Record thresholds only at the ranks that have none yet; the ranks added.
+
+    What the live feed's settled last reading fills in where the harvest did
+    not read that deep: a rank the standings on disk hold keeps the harvest's
+    number, and a later, deeper harvest replaces the feed's through
+    `set_finals`. The tournament's rank list grows with it, so the model reads
+    the new ranks.
+    """
+    held = get_finals(conn, comp_id)
+    added = []
+    for rank, value in points.items():
+        rank = int(rank)
+        if rank in held or value is None or value == "" or float(value) <= 0:
+            continue
+        conn.execute("INSERT INTO final_result (competition_id, rank, points) VALUES (?,?,?)",
+                     (comp_id, rank, float(value)))
+        added.append(rank)
+    if added:
+        row = conn.execute("SELECT ranks FROM competition WHERE id = ?", (comp_id,)).fetchone()
+        ranks = set(json.loads(row["ranks"])) if row and row["ranks"] else set()
+        update_competition(conn, comp_id, ranks=sorted(ranks | set(added)))
+    return sorted(added)
 
 
 def clear_finals(conn, comp_id: int) -> None:

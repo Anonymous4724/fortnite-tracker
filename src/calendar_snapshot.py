@@ -32,12 +32,23 @@ Every qualification cut is kept; of the prize tiers only the first place and
 the widest, since the question is "what gets me into the money", not the
 whole payout table.
 
+A cup with no finished edition in its region gets one more cell, `cold`: the
+week's recent boards of the same format replayed under its own scoring table,
+the median standing at each rank - see rescore.py. It needs the database and
+the boards on disk, so a run without them (the repository's own workflow,
+which refreshes the calendar between two runs of the machine that has them)
+carries the cells the previous calendar wrote for the rows it still lists.
+
     python src/calendar_snapshot.py              the next 7 days, every region
     python src/calendar_snapshot.py --days 14    a longer window
     python src/calendar_snapshot.py --out PATH   somewhere other than the predictor
     python src/calendar_snapshot.py --dry-run    print what it would write
+    python src/calendar_snapshot.py --no-replay  the rows without the replay cells
 
-Run it from a scheduled task next to the harvest; commit the result.
+Run it from a scheduled task next to the harvest; commit the result. The live
+feed reads the published calendar to know which cups to follow, so a cup
+announced after the last run is a cup nobody followed: the workflow above is
+what keeps the list fresh between two runs here.
 """
 from __future__ import annotations
 
@@ -296,6 +307,70 @@ def collect(days: int = DAYS, regions=None) -> list[dict]:
     return rows
 
 
+def replay_cells(rows: list[dict], previous: dict | None, want: bool = True) -> int:
+    """Hang the replay table on every row that can carry one; count them.
+
+    With the database and the boards at hand the tables are computed; without
+    them - the machine running this is not the one that harvests - the cells
+    of the previous calendar are kept for the rows still listed, so a refresh
+    of the list never takes a reading away. A cell is carried only for the
+    same scoring table and game count, which its signature spells.
+    """
+    kept = {}
+    for row in (previous or {}).get("events") or []:
+        if isinstance(row.get("cold"), dict):
+            kept[(row.get("event"), row.get("window"))] = row["cold"]
+    written = 0
+    conn = None
+    if want and os.path.exists(db.DB_PATH):
+        try:
+            import rescore
+            conn = db.connect()
+        except Exception as exc:                                     # noqa: BLE001
+            print(f"  (no replay tables: {exc})", file=sys.stderr)
+            conn = None
+    for row in rows:
+        table = None
+        if conn is not None:
+            try:
+                table = rescore.cold_table(conn, row)
+            except Exception as exc:                                 # noqa: BLE001
+                print(f"  (replay failed for {row.get('name')}: {exc})", file=sys.stderr)
+                table = None
+        if table is None:
+            table = kept.get((row.get("event"), row.get("window")))
+            if table and table.get("sig") and table["sig"] != rescore_signature(row):
+                table = None
+        if table:
+            row["cold"] = table
+            written += 1
+    if conn is not None:
+        conn.close()
+    return written
+
+
+def rescore_signature(row: dict) -> str:
+    """The signature a replay table of this row would carry."""
+    from calibration import table_signature
+    scoring = row.get("scoring") if isinstance(row.get("scoring"), dict) else None
+    return table_signature(scoring, row.get("games"))
+
+
+def previous_calendar(path: str) -> dict | None:
+    """The calendar already written at `path`, or None."""
+    try:
+        text = open(path, encoding="utf-8").read()
+    except OSError:
+        return None
+    start, stop = text.find("{"), text.rfind("}")
+    if start < 0 or stop < 0:
+        return None
+    try:
+        return json.loads(text[start:stop + 1])
+    except ValueError:
+        return None
+
+
 def packed(rows: list[dict], days: int) -> dict:
     """The rows with their scoring tables shared rather than repeated.
 
@@ -341,6 +416,8 @@ def main() -> int:
                         help="comma-separated, default every region Osirion lists")
     parser.add_argument("--dry-run", action="store_true",
                         help="print a summary and write nothing")
+    parser.add_argument("--no-replay", action="store_true",
+                        help="write the rows without the replay tables (see rescore.py)")
     args = parser.parse_args()
 
     regions = [r.strip().upper() for r in args.regions.split(",") if r.strip()] or None
@@ -350,6 +427,18 @@ def main() -> int:
         print("Nothing starts in that window — writing nothing, keeping the old file.",
               file=sys.stderr)
         return 1
+
+    out = args.out
+    if not out:
+        found = predictor_dir()
+        if not found and not args.dry_run:
+            print("No predictor folder beside this one — pass --out.", file=sys.stderr)
+            return 1
+        out = os.path.join(found, "calendar.js") if found else ""
+
+    # The replay tables, before the scoring tables are packed away: a cup
+    # with no edition in its region, its table replayed on the week's boards.
+    replayed = replay_cells(rows, previous_calendar(out) if out else None, want=not args.no_replay)
 
     payload = packed(rows, args.days)
     blob = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
@@ -365,19 +454,14 @@ def main() -> int:
     print(f"  {named} of {len(rows)} carry a scoring table the form can prefill")
     cuts = sum(1 for r in payload["events"] if any(t[0] in ("q", "p") for t in r["tiers"]))
     print(f"  {cuts} of {len(rows)} say who qualifies, so the page can ask the right rank")
+    print(f"  {replayed} carry a replay table: a cup with no edition in its region, "
+          f"priced off recent boards replayed under its scoring")
 
     if args.dry_run:
         for row in payload["events"][:8]:
             print(f"    {row['begin']}  {row['region']:<5} {row['name'][:52]}")
         return 0
 
-    out = args.out
-    if not out:
-        found = predictor_dir()
-        if not found:
-            print("No predictor folder beside this one — pass --out.", file=sys.stderr)
-            return 1
-        out = os.path.join(found, "calendar.js")
     with open(out, "w", encoding="utf-8") as fh:
         fh.write(text)
     print(f"\nWrote {out}")

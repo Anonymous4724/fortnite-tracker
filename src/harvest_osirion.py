@@ -38,7 +38,7 @@ import os
 import re
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 import db
 import osirion
@@ -51,11 +51,14 @@ RAW = os.path.join(ROOT, "data", "osirion")
 
 # Ranks worth recording. Anything past the fourth page of standings is noise for
 # a threshold model, and the deep ranks are what the curve extrapolates anyway.
+# The cuts a window pays - its qualification and prize ranks, see `cut_ranks` -
+# are recorded beside these: they are the ranks people ask the model about.
 RANKS = [1, 3, 5, 10, 20, 25, 50, 100, 120, 250, 500, 1000, 2500, 5000, 10000]
 
 # The API refuses a page index above 100, and serves 100 entries a page, so the
 # deepest rank anyone can reach through it is 10,100.
 PAGE_CAP = 101
+PAGE_SIZE = 100
 
 
 # --------------------------------------------------------------------------- #
@@ -213,6 +216,73 @@ def known_pages(work: dict):
     return osirion.total_pages(first) if first is not None else None
 
 
+def cut_ranks(work: dict) -> list[int]:
+    """The ranks this window is played for: its qualification and prize cuts.
+
+    A first pass three pages deep records the top 250 and never reaches a
+    cut at four thousand, and the deeper passes take days to come round. The
+    model then read that rank off whichever older edition happened to hold
+    it - last season's, hand-typed - while last week's edition sat in the
+    database without it. One more page per cut, fetched with the first pass,
+    is what puts the rank people actually ask about in the latest edition.
+    """
+    ranks = set()
+    for tier in osirion.payout_tiers(work.get("window") or {}, work.get("event_id") or ""):
+        rank = tier.get("rank")
+        if isinstance(rank, int) and 0 < rank <= PAGE_CAP * PAGE_SIZE:
+            ranks.add(rank)
+    return sorted(ranks)
+
+
+def cut_pages(work: dict, total) -> list[int]:
+    """The pages the cuts fall on, within the board and the API's reach."""
+    limit = min(PAGE_CAP, int(total)) if total else PAGE_CAP
+    pages = []
+    for rank in cut_ranks(work):
+        page = (rank - 1) // PAGE_SIZE
+        if page < limit and page not in pages:
+            pages.append(page)
+    return pages
+
+
+# A board settles a few minutes after its window closes; before that it is
+# still collecting the games that were under way.
+SETTLE_MINUTES = 30
+
+
+def too_early(work: dict) -> bool:
+    """Was this window read before its cup had finished, and is it over now?
+
+    Read before it starts, the API answers with an empty board and
+    `totalPages: 0`; read while it runs, with a board that is still moving.
+    Either one, left on disk, is read by every later pass as "this window is
+    done": the cup is never harvested, its result never enters the database,
+    and the live feed's readings have nothing to attach themselves to. So a
+    page written before the window's end - plus the minutes the board takes to
+    settle - is not an answer, and the window is read again from page zero.
+
+    Both halves matter. A cup still to come has nothing to say either, and the
+    calendar runs weeks ahead: asking it again every night would be hundreds
+    of calls a run for an empty board we can predict. Its empty page stays on
+    disk until the cup has actually been played.
+    """
+    end = str(work.get("end") or "")[:19].replace(" ", "T")
+    if len(end) < 16:
+        return False
+    try:
+        closed = datetime.strptime(end[:16], "%Y-%m-%dT%H:%M").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return False
+    settled = closed.timestamp() + SETTLE_MINUTES * 60
+    if time.time() < settled:
+        return False
+    try:
+        written = os.path.getmtime(page_path(work, 0))
+    except OSError:
+        return False
+    return written < settled
+
+
 def fetch_window(work: dict, pages: int) -> int:
     """Download the pages we are missing, and no more than the window has.
 
@@ -223,12 +293,15 @@ def fetch_window(work: dict, pages: int) -> int:
     """
     calls, page = 0, 0
     limit = min(pages, PAGE_CAP)
-    settled = known_pages(work)
+    # Pages taken before the cup was over say nothing about how it ended: the
+    # window is read again, from page zero, and what is on disk is ignored.
+    stale = too_early(work)
+    settled = None if stale else known_pages(work)
     if settled is not None:
         limit = min(limit, settled)
 
     while page < limit:
-        saved = read_page(work, page)
+        saved = None if stale else read_page(work, page)
         if saved is None:
             try:
                 saved = osirion.leaderboard_page(work["event_id"], work["window_id"], page)
@@ -246,10 +319,44 @@ def fetch_window(work: dict, pages: int) -> int:
         if not osirion.entries_of(saved):
             break
         page += 1
+    # The cuts' pages, past the ones just read: one request per cut, on the
+    # first pass, so the latest edition carries the rank it was played for.
+    for number in cut_pages(work, settled):
+        if number < page or (not stale and read_page(work, number) is not None):
+            continue
+        try:
+            saved = osirion.leaderboard_page(work["event_id"], work["window_id"], number)
+        except osirion.OsirionError:
+            continue
+        save(page_path(work, number), saved)
+        calls += 1
     return calls
 
 
-def fetch(work_list: list[dict], depths: list[int]) -> None:
+# The newest windows are read deeper than the pass asks: the boards the
+# replay of a cup nobody has seen is made of (see rescore.py) are the most
+# recent ones of its format, and a replay is trusted a third as deep as the
+# board was loaded, so ten pages puts rank 250 within reach where three put
+# rank 100. Seven more pages for each of the week's sixty-odd windows is a
+# few minutes at the API's rate, once.
+RECENT_DAYS = 21
+RECENT_PAGES = 10
+
+
+def recent(work: dict, days: int = RECENT_DAYS) -> bool:
+    """Did this window begin inside the last `days`?"""
+    begin = str(work.get("begin") or "")[:19].replace(" ", "T")
+    if len(begin) < 16:
+        return False
+    try:
+        started = datetime.strptime(begin[:16], "%Y-%m-%dT%H:%M").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return False
+    return time.time() - started.timestamp() <= days * 86400
+
+
+def fetch(work_list: list[dict], depths: list[int], recent_pages: int = RECENT_PAGES,
+          recent_days: int = RECENT_DAYS) -> None:
     """Breadth first, then depth.
 
     Reaching the API's maximum depth on every window is days of downloading, so
@@ -257,13 +364,15 @@ def fetch(work_list: list[dict], depths: list[int]) -> None:
     has its top few hundred ranks, which is already enough to rebuild the
     model. Later passes only fetch the pages the earlier ones did not, so
     stopping after any pass leaves a usable, evenly covered set rather than a
-    complete third of the calendar and nothing of the rest.
+    complete third of the calendar and nothing of the rest. The newest
+    windows go `recent_pages` deep on every pass, see RECENT_PAGES.
     """
     for number, depth in enumerate(depths, 1):
-        print(f"\n  pass {number}/{len(depths)} — up to {depth} pages a window")
+        print(f"\n  pass {number}/{len(depths)} — up to {depth} pages a window"
+              + (f", {recent_pages} for the last {recent_days} days" if recent_pages > depth else ""))
         started, done, skipped = time.monotonic(), 0, 0
         for index, work in enumerate(work_list, 1):
-            calls = fetch_window(work, depth)
+            calls = fetch_window(work, max(depth, recent_pages) if recent(work, recent_days) else depth)
             done += calls
             skipped += calls == 0
             if index % 25 == 0 or index == len(work_list):
@@ -309,6 +418,10 @@ def index_window(work: dict, entries: list[dict], payload: dict | None) -> dict:
         "playlist": window.get("playlistId") or "",
         "game_mode": osirion.game_mode(event),
         "entries_seen": len(entries),
+        # What this derivation read; a later build derives the window again
+        # when more pages are on disk than this.
+        "pages_seen": pages_on_disk(work),
+        "cuts": cut_ranks(work),
         "deepest_rank": max((e.get("rank") or 0) for e in entries) if entries else 0,
         "total_pages": (payload or {}).get("totalPages"),
         "games": osirion.match_cap(window) or max(
@@ -320,8 +433,13 @@ def index_window(work: dict, entries: list[dict], payload: dict | None) -> dict:
 
 
 def saved_entries(work: dict, pages: int) -> list[dict]:
-    """Every standings row on disk for this window, in rank order."""
-    rows = []
+    """Every standings row on disk for this window, in rank order.
+
+    The pages read in sequence, then the cuts' pages beyond them: those sit
+    alone past a gap, and a walk that stopped at the gap would leave the rank
+    the cup was played for on disk and out of the database.
+    """
+    rows, page = [], 0
     for page in range(min(max(pages, 1), PAGE_CAP)):
         payload = read_page(work, page)
         if payload is None:
@@ -330,11 +448,17 @@ def saved_entries(work: dict, pages: int) -> list[dict]:
         rows += found
         if not found:
             break
+    for number in cut_pages(work, known_pages(work)):
+        if number <= page:
+            continue
+        payload = read_page(work, number)
+        if payload is not None:
+            rows += osirion.entries_of(payload)
     rows.sort(key=lambda e: e.get("rank") or 10 ** 9)
     return rows
 
 
-def thresholds_of(entries: list[dict]) -> dict[int, float]:
+def thresholds_of(entries: list[dict], cuts: list[int] | tuple = ()) -> dict[int, float]:
     """Points held by the team sitting exactly on each rank we care about.
 
     Zero is dropped rather than stored. Deep in a big leaderboard whole blocks of
@@ -342,13 +466,17 @@ def thresholds_of(entries: list[dict]) -> dict[int, float]:
     points to finish 5000th" is not a threshold anyone can be wrong about. The
     model is multiplicative, so it cannot produce a zero at all; keeping them
     puts a division by zero in every error measurement downstream.
+
+    `cuts` are the window's own ranks - what it qualifies or pays at - kept
+    beside the fixed list.
     """
     by_rank = {}
     for entry in entries:
         rank, points = entry.get("rank"), entry.get("pointsEarned")
         if rank and points is not None and float(points) > 0:
             by_rank.setdefault(int(rank), float(points))
-    return {r: by_rank[r] for r in RANKS if r in by_rank}
+    wanted = sorted(set(RANKS) | {int(r) for r in cuts})
+    return {r: by_rank[r] for r in wanted if r in by_rank}
 
 
 def field_of(work: dict, entries: list[dict]) -> int:
@@ -400,6 +528,10 @@ def stage_of(work: dict) -> str:
                                            or window.get("eventWindowId") or ""))
 
 
+REGION_TAG = re.compile(r"^\[(?:" + "|".join(osirion.REGIONS) + r")\]\s*|\s*\[(?:"
+                        + "|".join(osirion.REGIONS) + r")\]$", re.I)
+
+
 def family_of(event: dict) -> str:
     """The cup's name: both title lines, because the second is not decoration.
 
@@ -413,6 +545,14 @@ def family_of(event: dict) -> str:
     display = event.get("displayData") or {}
     lines = [str(display.get(key) or "").strip() for key in ("titleLine1", "titleLine2")]
     name = " ".join(line for line in lines if line)
+    # A region tag in the title - "[NAW] Solo Victory Cup Battle Royale", which
+    # Epic started writing on the North American events in September 2026 -
+    # is not part of the cup's name: the region is a column of its own, and a
+    # name carrying it filed the NAW edition apart from the six others, then,
+    # being the newest, renamed the whole series after it. Only a bracketed
+    # region code is stripped: "(BR)" in "The Mandalorian Cup (BR)" is the
+    # game mode, and stays.
+    name = REGION_TAG.sub("", name).strip()
     if name:
         # Epic ran a Battle Royale and a Zero Build "Override Series" under one
         # title in the same hour; only the id tells them apart, and they are
@@ -436,7 +576,7 @@ def family_of(event: dict) -> str:
 # re-derives everything when they differ: an incremental build would otherwise
 # file this week's editions under the new names and leave last season's under
 # the old, and no category would ever join up again.
-RULES_VERSION = "2026-09-05 entry requirement read off the window"
+RULES_VERSION = "2026-09-13 the cuts' ranks recorded; a renamed series keeps one name"
 
 
 def rules_changed(conn) -> bool:
@@ -452,9 +592,143 @@ def has_pages(work: dict) -> bool:
     return os.path.exists(page_path(work, 0))
 
 
+CANONICAL_WINDOWS = 14
+
+
+def canonical_names(work_list: list[dict]) -> dict[str, str]:
+    """One name per series, the newest edition's: what a renamed cup is filed under.
+
+    Epic renames cups between seasons and keeps the id - "Solo Victory Cup"
+    became "Solo Victory Cup Battle Royale" at season 42, "Console Solo Victory
+    Cup (ZB)" became "Console Zero Build Solo Victory Cup" - and the model's
+    categories are keyed on the name. Filed under the name of the day, the
+    first editions of the new season had no history at all, and a cup's past
+    stayed under a name nothing on the calendar would ever match again. The
+    series key is the identity; the newest name is the label, so the calendar
+    the site shows, which carries today's name, finds the whole history.
+    """
+    # The name most of the series' newest windows carry - two weeks or so of
+    # a weekly cup across its regions - the newest breaking a tie. The newest
+    # alone was the rule once, and one oddly titled window renamed a thousand
+    # rows for a week; a rename Epic means still wins, a week after its
+    # schedule is published, since the catalogue runs ahead.
+    recent: dict[str, list] = {}
+    for work in work_list:                        # newest first
+        key = osirion.series_key(work["event_id"])
+        if key and len(recent.setdefault(key, [])) < CANONICAL_WINDOWS:
+            recent[key].append(family_of(work["event"]))
+    names: dict[str, str] = {}
+    for key, seen in recent.items():
+        counts: dict[str, int] = {}
+        for name in seen:
+            counts[name] = counts.get(name, 0) + 1
+        names[key] = max(seen, key=lambda name: (counts[name], -seen.index(name)))
+    return names
+
+
+def former_names(work_list: list[dict], canonical: dict[str, str]) -> dict[str, str]:
+    """Every other name a series has run under, mapped to its newest one."""
+    former: dict[str, str] = {}
+    for work in work_list:
+        key = osirion.series_key(work["event_id"])
+        name = family_of(work["event"])
+        new = canonical.get(key)
+        if new and name != new and name not in canonical.values():
+            former[name] = new
+    return former
+
+
+def unify_names(conn, canonical: dict[str, str], former: dict[str, str] | None = None) -> int:
+    """File every edition of a series under its newest name; count the renames.
+
+    Harvested rows follow their series key. Hand-typed rows, which have no key,
+    follow the name: one typed under a former name of a series moves with it.
+    The objectives - the cuts a person tracks per category - move too, so the
+    tiers entered under the old name are not left keyed to a name no
+    tournament carries any more.
+    """
+    former = dict(former or {})
+    renamed, applied = 0, set()
+    rows = conn.execute("SELECT id, family, name, stage, series_key, source FROM competition "
+                        "WHERE series_key != ''").fetchall()
+    current = set(canonical.values())
+    for row in rows:
+        new = canonical.get(row["series_key"])
+        old = (row["family"] or "").strip()
+        if not new or not old or old == new:
+            continue
+        # A name another series still runs under is not a former name.
+        if old not in current:
+            former[old] = new
+        name = f"{new} - {row['stage']}" if (row["stage"] or "").strip() else new
+        conn.execute("UPDATE competition SET family = ?, name = ? WHERE id = ?",
+                     (new, name, row["id"]))
+        renamed += 1
+        applied.add((old, new))
+    for old, new in former.items():
+        # Rows the harvest did not write carry no key of Epic's - a key the
+        # tracker made up from the name, or none - and follow the name.
+        for row in conn.execute("SELECT id, stage, series_key FROM competition WHERE family = ?",
+                                (old,)).fetchall():
+            if row["series_key"] in canonical:
+                continue
+            name = f"{new} - {row['stage']}" if (row["stage"] or "").strip() else new
+            conn.execute("UPDATE competition SET family = ?, name = ? WHERE id = ?",
+                         (new, name, row["id"]))
+            renamed += 1
+            applied.add((old, new))
+        # An objective keyed on the old name, or on "old name · stage", follows;
+        # one the new name already has keeps the new name's.
+        for row in conn.execute("SELECT id, kind, region FROM objective WHERE kind = ? "
+                                "OR kind LIKE ?", (old, old + " · %")).fetchall():
+            kind = new + row["kind"][len(old):]
+            taken = conn.execute("SELECT 1 FROM objective WHERE kind = ? AND region = ? LIMIT 1",
+                                 (kind, row["region"])).fetchone()
+            if taken:
+                conn.execute("DELETE FROM objective WHERE id = ?", (row["id"],))
+            else:
+                conn.execute("UPDATE objective SET kind = ? WHERE id = ?", (kind, row["id"]))
+    if renamed:
+        print(f"  {renamed} tournament(s) renamed, to the name Epic now gives the cup:")
+        for old, new in sorted(applied):
+            print(f"    {old!r} -> {new!r}")
+    return renamed
+
+
+def pages_on_disk(work: dict) -> int:
+    """How many pages of this window are on disk: the run from page zero, plus
+    the cuts' pages past it. Cheap - it looks, it does not read."""
+    count = 0
+    while count < PAGE_CAP and os.path.exists(page_path(work, count)):
+        count += 1
+    for number in cut_pages(work, None):
+        if number >= count and os.path.exists(page_path(work, number)):
+            count += 1
+    return count
+
+
+def built_pages(work: dict):
+    """How many pages the last derivation of this window read, or None when it
+    never was derived - or was, by a version that did not note it."""
+    path = raw_path("index", work["event_id"], f"{slug(work['window_id'])}.json.gz")
+    if not os.path.exists(path):
+        return None
+    try:
+        return int(load(path).get("pages_seen"))
+    except (OSError, ValueError, EOFError, AttributeError, TypeError):
+        return None
+
+
 def build(work_list: list[dict], pages: int, limit: int | None = None,
-          chunk: int = 200) -> dict:
+          chunk: int = 200, rebuild: bool = False) -> dict:
     """Write one competition per window, with its measured thresholds.
+
+    A window already in the database is derived again, in place, when more
+    of its standings are on disk than the last derivation saw - a deeper pass
+    came round, or its cut's page arrived - and on `rebuild` for all of them.
+    In place, because a tournament's row is what the live feed's readings are
+    filed against: deleting it to write it afresh, as an earlier version did,
+    took every reading the feed had made of that cup with it.
 
     Reports on every window rather than on every write. An earlier version
     printed only when it wrote something, so a run over eleven thousand windows
@@ -464,27 +738,31 @@ def build(work_list: list[dict], pages: int, limit: int | None = None,
     Committed in chunks, because one transaction around eleven thousand
     tournaments is a long time to hold a lock and a lot to lose to a Ctrl-C.
     """
-    counts = {"written": 0, "already": 0, "no_pages": 0, "too_few": 0,
-              "scoring_ok": 0, "scoring_guessed": 0}
+    counts = {"written": 0, "updated": 0, "already": 0, "no_pages": 0, "too_few": 0,
+              "scoring_ok": 0, "scoring_guessed": 0, "renamed": 0}
     todo = work_list[:limit]
     ready = [w for w in todo if has_pages(w)]
     print(f"  {len(todo)} windows, {len(ready)} with standings on disk")
     if not ready:
         counts["no_pages"] = len(todo)
         return counts
+    canonical = canonical_names(work_list)
 
     started = time.monotonic()
     for offset in range(0, len(ready), chunk):
         with db.session() as conn:
-            known = {(c["event_id"], c["window_id"])
+            known = {(c["event_id"], c["window_id"]): c["id"]
                      for c in db.list_competitions(conn)
                      if c.get("event_id") and c.get("window_id")}
             for work in ready[offset:offset + chunk]:
-                if (work["event_id"], work["window_id"]) in known:
-                    counts["already"] += 1
-                    continue
+                comp_id = known.get((work["event_id"], work["window_id"]))
+                if comp_id is not None and not rebuild:
+                    seen = built_pages(work)
+                    if seen is not None and pages_on_disk(work) <= seen:
+                        counts["already"] += 1
+                        continue
                 entries = saved_entries(work, pages)
-                finals = thresholds_of(entries)
+                finals = thresholds_of(entries, cut_ranks(work))
                 if len(finals) < 3:
                     counts["too_few"] += 1
                     continue
@@ -509,17 +787,34 @@ def build(work_list: list[dict], pages: int, limit: int | None = None,
                 field = field_of(work, entries)
 
                 stage = stage_of(work)
-                comp_id = db.create_competition(
-                    conn, name=f"{family_of(event)} - {stage}" if stage else family_of(event),
-                    region=region,
-                    team_mode=osirion.team_mode(event, entries, window),
-                    game_mode=osirion.game_mode(event),
-                    start_time=work["begin"].replace("T", " ").replace("Z", "")[:16],
-                    end_time=work["end"].replace("T", " ").replace("Z", "")[:16] or None,
-                    ranks=sorted(finals), max_games=games or None, scoring=scoring,
-                    notes=f"osirion · scoring {kind}")
+                family = canonical.get(osirion.series_key(work["event_id"])) or family_of(event)
+                name = f"{family} - {stage}" if stage else family
+                start = work["begin"].replace("T", " ").replace("Z", "")[:16]
+                end = work["end"].replace("T", " ").replace("Z", "")[:16] or None
+                if comp_id is None:
+                    comp_id = db.create_competition(
+                        conn, name=name, region=region,
+                        team_mode=osirion.team_mode(event, entries, window),
+                        game_mode=osirion.game_mode(event),
+                        start_time=start, end_time=end,
+                        ranks=sorted(finals), max_games=games or None, scoring=scoring,
+                        notes=f"osirion · scoring {kind}")
+                    counts["written"] += 1
+                else:
+                    # The same row, derived again: the feed's readings stay
+                    # attached, and a rank the feed filed as a final keeps it
+                    # unless the standings now hold that rank themselves.
+                    held = db.get_finals(conn, comp_id)
+                    db.update_competition(
+                        conn, comp_id, name=name, region=region,
+                        team_mode=osirion.team_mode(event, entries, window),
+                        game_mode=osirion.game_mode(event),
+                        start_time=start, end_time=end,
+                        ranks=sorted(set(finals) | set(held)), max_games=games or None,
+                        scoring=scoring, notes=f"osirion · scoring {kind}")
+                    counts["updated"] += 1
                 db.update_competition(
-                    conn, comp_id, source="osirion", family=family_of(event),
+                    conn, comp_id, source="osirion", family=family,
                     stage=stage, field_size=field or None,
                     entry=osirion.entry_requirement(window),
                     event_id=work["event_id"], window_id=work["window_id"], tracking=1,
@@ -538,14 +833,15 @@ def build(work_list: list[dict], pages: int, limit: int | None = None,
                     db.set_objectives(conn,
                                       db.category_of(db.get_competition(conn, comp_id)),
                                       region, tiers[:12])
-                counts["written"] += 1
 
         done = min(offset + chunk, len(ready))
         elapsed = time.monotonic() - started
         eta = (len(ready) - done) * elapsed / done / 60 if done else 0
-        print(f"    {done:>6}/{len(ready)} · written {counts['written']} · "
-              f"already there {counts['already']} · too few thresholds "
-              f"{counts['too_few']} · about {eta:.0f} min left")
+        print(f"    {done:>6}/{len(ready)} · written {counts['written']} · derived again "
+              f"{counts['updated']} · already there {counts['already']} · too few "
+              f"thresholds {counts['too_few']} · about {eta:.0f} min left")
+    with db.session() as conn:
+        counts["renamed"] = unify_names(conn, canonical, former_names(work_list, canonical))
     return counts
 
 
@@ -643,6 +939,10 @@ def main() -> int:
     parser.add_argument("--from-year", type=int, default=2025)
     parser.add_argument("--passes", default="3,10,30,101",
                         help="depths to fetch, shallowest first (API caps at 101)")
+    parser.add_argument("--recent-pages", type=int, default=RECENT_PAGES,
+                        help=f"pages to read of the newest windows on every pass (default {RECENT_PAGES})")
+    parser.add_argument("--recent-days", type=int, default=RECENT_DAYS,
+                        help=f"how new a window has to be for that (default {RECENT_DAYS})")
     parser.add_argument("--limit", type=int, help="stop after this many windows")
     parser.add_argument("--log", default=os.path.join(RAW, "harvest.log"),
                         help="where to copy the progress; empty string for none")
@@ -658,7 +958,7 @@ def main() -> int:
     parser.add_argument("--fetch", action="store_true", help="phase 2 only")
     parser.add_argument("--build", action="store_true", help="phase 3 only")
     parser.add_argument("--rebuild", action="store_true",
-                        help="delete the harvested tournaments and derive them again")
+                        help="derive every harvested tournament again, in place")
     parser.add_argument("--purge-manual", action="store_true",
                         help="delete hand-entered tournaments once harvesting is done")
     args = parser.parse_args()
@@ -685,11 +985,8 @@ def main() -> int:
                       "minutes.")
                 args.rebuild = True
     if args.rebuild:
-        with db.session() as conn:
-            stale = [c["id"] for c in db.list_competitions(conn) if c.get("source") == "osirion"]
-            for comp_id in stale:
-                db.delete_competition(conn, comp_id)
-        print(f"\n  {len(stale)} harvested tournament(s) removed; deriving them again.")
+        # In place: the rows stay, and with them the live feed's readings.
+        print("\n  Deriving every harvested tournament again, in place.")
         print("  Hand-entered tournaments are untouched.")
         args.build = True
     started = datetime.now()
@@ -721,16 +1018,18 @@ def main() -> int:
 
     depths = sorted({min(max(int(p), 1), 101)
                      for p in args.passes.split(",") if p.strip().isdigit()})
+    recent_pages = min(max(int(args.recent_pages or 0), 0), PAGE_CAP)
     if everything or args.fetch:
         print(f"\nStandings, in {len(depths)} pass(es): {depths}, at {rate} requests a minute")
-        fetch(work, depths)
+        fetch(work, depths, recent_pages, max(int(args.recent_days or 0), 0))
 
     if everything or args.build:
         print("\nBuilding competitions")
-        counts = build(work, max(depths), limit=args.limit)
-        print(f"\n  written {counts['written']}, already there {counts['already']}, "
+        counts = build(work, max(depths + [recent_pages]), limit=args.limit, rebuild=args.rebuild)
+        print(f"\n  written {counts['written']}, derived again {counts['updated']}, "
+              f"already there {counts['already']}, "
               f"no standings downloaded {counts['no_pages']}, "
-              f"too few thresholds {counts['too_few']}")
+              f"too few thresholds {counts['too_few']}, renamed {counts['renamed']}")
         print(f"  scoring verified against the standings {counts['scoring_ok']}, "
               f"unverified {counts['scoring_guessed']}")
         if counts["no_pages"] and not counts["written"]:

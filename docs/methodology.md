@@ -171,10 +171,708 @@ than a number typed into its source.
    with the top 100 read at 157 and the top 500 at 120 that priced the top 160 below the
    top 500 (the ladder's monotone walk then pinned it to 120).
 
+   A run of the feed is not one snapshot, and treating it as one was worth more than any of
+   the above. Every page of a board is a separate request; the copies the API returns are
+   not the same age, and `MAX_PAGES` means a rank can be missing from a run altogether. So
+   the reading of a rank could be minutes stale while the first page was fresh, and the rank
+   asked about could drop in and out of the runs. Both moved the answer: a stale page priced
+   its rank at the wrong minute, and a missing one sent the forecast back to the ratio
+   carried over from other ranks, which at the deep end of an open queue runs 10–15 % high.
+   The feed now stamps a reading with its own page's time when that differs from the first
+   page's, and the predictor keeps an evening's *standing* — the reading of each rank that
+   stands now, whichever run it arrived in, the richer of two of the feed's own (a threshold
+   never falls, so the poorer is the older copy), a rank unread for 25 minutes let go — and
+   prices each reading at the minute it was taken. Replaying six evenings from the feed's
+   own history, at the rank each cup qualifies on, through the page's own code:
+
+   | evening (rank) | median move between readings | largest move | median error after 30 % |
+   |---|---|---|---|
+   | Mobile LCQ BR (160) | 6.6 % → 2.2 % | 33.9 % → 13.2 % | 3.3 % → 2.8 % |
+   | Solo Victory Cup NAW (800) | 3.2 % → 2.3 % | 16.2 % → 8.0 % | 1.6 % → 1.4 % |
+   | Mobile LCQ EU (160) | 3.0 % → 1.8 % | 21.5 % → 7.1 % | 3.0 % → 3.0 % |
+   | Mobile LCQ ME (160) | 2.3 % → 1.2 % | 9.7 % → 9.7 % | 1.6 % → 1.6 % |
+   | Reload Duos OCE (500) | 1.8 % → 1.1 % | 11.5 % → 8.8 % | 6.4 % → 6.1 % |
+   | FNCS Div 1 final NAW (20) | 15.2 % → 2.9 % | 28.8 % → 15.2 % | 16.7 % → 19.5 % |
+
+   All as a share of the final threshold. The sealed final is the same story from the other
+   side: a run handed a copy of the board from before the last game un-played a game, and
+   the answer fell with it. Its error does not improve — after two of six games the model
+   read that lobby 19 % high whatever the timing — which is the honest reading: this fixed
+   the feed's clock, not the model's aim.
+
+   The window's close is not the end of the cup, and the curve stopped there. `analysis/live.py`
+   measured the share at tenths of the session, τ = 0.1 … 1.0; at τ = 1 an open queue's threshold
+   sits at 0.93 of its final value, because the games under way when the clock stops keep landing
+   for another quarter of an hour. The page then priced *every* reading taken after the close as a
+   reading at the close and added that 7 % again to a board that had already collected it, so the
+   answer climbed with the standings instead of converging on them: on the Reload ZB Duos EU cup of
+   6 September the top 20 read 559 at the close (forecast 600) and 607 eighteen minutes later
+   (forecast 651), against a board that ended at 607. The same replay now continues past the close,
+   in minutes rather than in tenths — the games still in flight last a game, whatever the window
+   was — and gives a second, short curve (23 open boards on the machine this was written on; the
+   harvest re-measures it at every run of the module):
+
+   | minutes past the close | 0 | +5 | +10 | +15 | +20 |
+   |---|---|---|---|---|---|
+   | share of the final board | 0.93 | 0.95 | 0.97 | 1.00 | 1.00 |
+   | spread | ±0.05 | ±0.05 | ±0.03 | ±0.02 | ±0.01 |
+
+   A reading taken after the close is priced on that curve and carries its spread, which is why the
+   band closes as the board settles rather than staying at the close's ±5 %. Two smaller rules go
+   with it, both found by the same replay: between two readings of a rank with the same points the
+   later one stands (it says the board has stopped moving, which the earlier one could not), and a
+   standing the feed reads again is clocked at the minute it was last read rather than the minute
+   it first stood. On the five open-queue evenings of the feed's history, the last number the page
+   shows — the one a player reads when the cup is over — was 7.0 to 7.5 % above the final board
+   before, and is 0.0 to 1.3 % from it now.
+
    What is still unvalidated is the precision blend itself: the weights are principled, not
    measured on held-out cups. On the one real test so far — a sealed final read at rank 5 at
    half time — the blend landed 3.9 % from the final threshold where history alone was 14.0 %
    out and the readings alone 6.3 % out. That is one tournament.
+
+## Audit, 10 September 2026
+
+A pass over the whole cascade against the held-out evenings, looking for where the error
+came from rather than how much of it there was. Six things were found. Every figure in this
+section was measured on the database as it stood on 8 September — 7,329 tournaments after
+the Ranked Cups are set aside, the newest 600 held out — and `analysis/validate.py` prints
+the current ones; the export carries them into the page.
+
+**The validation was measuring the split, not the model.** The forecasting split froze the
+pool at the first held-out day: all 600 targets, six weeks of them, were forecast from what
+came before 25 July. A weekly cup's fifth week was priced off the season before, and every
+edition of a cup born inside the window — thirty-three Arena test cups, twenty-one Solo
+Reload Victory Cups — counted as a cold start. The app never works that way: on the night,
+last week's edition is in the database. The validation is now a rolling origin — each target
+is forecast from the pool *and* from every held-out tournament that started on an earlier
+day, the curve fitted once on the pool so no target shapes it — and the baselines are held to
+the same rule. On the same 600 evenings, with the same code, the change of split alone
+takes the median error from 12.9 % to 6.8 % and the cold share from 58 % to 34 %: those were
+numbers about the split. The day is the grain — an evening's other regions never inform it —
+so the split still errs on the pessimistic side. `--frozen` reproduces the old one.
+
+**A cup was the same cup in any format.** The narrow circle the app calibrates on has always
+keyed on team size and game mode; the wide tables the cascade reads — the previous edition,
+the level, the shape, the field — keyed on the name and the region alone. So the first Duo
+week of FNCS Division 1 Practice read the last Trio edition, a year older and a third the
+field, as its previous edition, straight; the fifty-team Major finals read the thirty-three-
+team finals of the season before (30 % error, 58 % inside the band); and the Performance
+Evaluation, which alternates Battle Royale and Reload weeks, read whichever ran last. The
+tables are now keyed on the format too. A cup that has never run in its format reads its last
+edition in another one with the band widened by half, like a different entry bar — except a
+single lobby, which the closed-lobby rung prices at 5 % where the other lobby size priced it
+at 30 %. 185 of the 1,859 cup-and-region groups in the database have run in more than one
+format; the Performance Evaluation in EU has switched seven times.
+
+**The last places of a closed lobby were forecast.** Rank 50 of 50 was priced at thirty
+points where the board said eight, twenty-one times out of twenty-one: the last places are
+teams that left after a game or two, and no level, shape or share of the lobby says how many
+left. The cascade now refuses them (past 90 % of the lobby) unless the previous edition's own
+reading is there, which is the only honest number.
+
+**A later round was priced as its open round.** The cold start keyed on the kind of cup, the
+platform and whether it was a final; "· Round 2" and up fell in with the open round, and a
+few hundred qualified teams playing a shorter session score another share of the maximum
+than ten thousand did. Split, the cold-start error on those rows went from 24.8 % to 20.3 %
+and its coverage from 77 % to 83 %.
+
+**Sixteen-player heats were setting the mobile cold start.** A heat has no rank 20, so its
+winner's score was read back through the curve to a "level" a tenth of it, and the share of
+the maximum it contributed was 0.09 where every open mobile cup sits near 0.5. The two
+populations were nearly equal in number; the week the heats tipped the median, the cold start
+for an open mobile cup dropped to a tenth of the maximum overnight (Shadow Cup Mobile, 21
+August: 54 points forecast at rank 20 against 343). Single lobbies have their own table and
+are now left out of that one.
+
+**One curve did not fit every field.** The same `q = rank / field` is a different place in a
+division of three hundred qualified teams, where everyone plays every game, and in an open
+queue of ten thousand, where half the field plays one. Fitted on all boards the exponent `b`
+lands on 0.88; fitted by band of field size it wants 1.24 below 300 teams, 1.25 to 1,000,
+1.12 to 3,000, 0.55 to the API's ceiling and 0.15 above it — the two ends sat on the edges
+of the old search grid, which stopped at 0.2 and 1.2. Where no edition of the cup existed,
+the pooled curve ran a fifth low at rank 1,000 and a third low at rank 2,500 of the big
+queues, and a quarter low at ranks 250–500 of the smaller fields. The curve is now
+fitted once per band (five bands, each needing 200 boards; the pooled fit answers otherwise)
+and the cascade reads the band the cup falls in, for the shape, the field move and the level
+read back from an edition that published no rank 20.
+
+Together, on the audit's own replay of the same 600 evenings under the rolling split (the
+replay also kept the Ranked Cups, so its figures sit a little above the validation's):
+
+| | code of 7 September | code of 10 September |
+|---|---:|---:|
+| median error, all rows | 6.8 % | **5.8 %** |
+| mean error | 17.8 % | 13.3 % |
+| inside the 80 % band | 85 % | 90 % |
+| cup has run before (previous edition) | 3.0 % | 2.9 % |
+| cup has never run (scoring table) | 22.2 % | 14.4 % |
+| single-lobby final never run | 11.4 % | 7.4 % |
+| ranks past 500 | 16.8 % · 66 % covered | 14.2 % · 74 % covered |
+
+The steps, measured one at a time on that replay: the format keys and the fallback
+6.80 → 6.63, the later-round stage → 6.37, the banded curves → 6.05, the heats out of the
+share table → 5.78. `analysis/validate.py` itself, on the same database, reads 5.6 % median
+and 12.9 % mean error with 91 % inside the band, the previous-edition rung at 2.8 %, the
+cold start at 14.4 % on 35 % of the rows, the closed-lobby rung at 7.4 %, and the model
+0.27 points ahead of the previous edition read straight (interval +0.11 to +0.47, whole span
+above zero) where the frozen split with the old code read 11.1 %. A page showing 50 % and
+90 % ranges takes them from the quantiles this validation writes, so they follow the split:
+the 50 % range narrowed from −0.31 … +0.46 to −0.19 … +0.27 half-widths in log terms.
+
+What the audit did not change, and why: the share of the maximum a cold start rests on is
+a median over the whole history, and a median over the last thirty editions tracked recent
+metas better on the console and Reload cups (13.6 → 6.3 %, 21.7 → 11.3 %) but blew up the
+mobile ones when a bad month landed in the window (33 → 78 %). Left pooled. The Arena test
+cups are a format the model cannot price from the scoring table — the number of games is
+not fixed, and one edition's winner scored 1,200 where ten games of 60 allow 600 — and stay
+cold until their second week, when the previous edition takes over.
+
+**The live model, replayed.** The feed's own history — 39 evenings by 8 September — was
+replayed through the page's code with a model exported as of the morning of 5 September, so
+nothing read its own result. In open queues the error at the qualifying rank runs from 5.0 %
+at a third of the session to 2.2 % at the close, with a bias of +2.9 % early and −1.1 % late;
+the 50 % range holds 54–63 % of the finals and the 90 % range 91–94 %. Sealed lobbies were
+worse — 7.5 to 11.6 %, biased 4 to 10 % low, the ranges holding 18–44 % and 42–82 % — for two
+reasons the replay separated: the feed's old rule declared a board final after five games of
+six, and the pooled closed-lobby curve read "game 2 of 6" at 0.363 of the final where a
+six-game lobby sits at 0.33. The curve is now measured per game count (`pace.games_curve`,
+519 six-game Battle Royale finals, 136 eight-game Reload, 84 six-game Zero Build) and the
+page reads the one that matches; a result is declared only when the board is sealed and owes
+no game, or twenty minutes past the close, and has been read twice ten minutes apart
+unchanged. The feed keeps reading for 45 minutes past the close rather than 25: three-hour
+practice cups were still 3–7 % short of their final board at +25.
+
+## The end of a cup, 10 September 2026
+
+A forecast that sat under the live board. At the close of the Performance Evaluation EU of
+10 September the page said 261 points for the top 50 — the rank that cup qualifies on — while
+the standings on osirion.gg already showed 270. Replaying that evening's feed history through
+the page reproduces it exactly: the reading of 18:18, eighteen minutes past the buzzer, was
+261, and the page projected 261 with a 90 % range of 258–265. The board went on to 272 by
+18:23 and was still rising when it got there.
+
+**The board the page holds is not the board the model was measured on.** `by_tail` measures
+the settling from each roster's own session end times: by twenty minutes past the buzzer every
+game has ended, so it reports the board final — 1.000 of the final threshold — with a spread
+of ±0.008. The page reads none of that. It reads Osirion's published board, through the feed,
+and Osirion lands minutes behind the games. Measured on the feed's own history — 1,078
+readings past the close over 34 tracked open queues, against the finals harvested afterwards —
+the published board can be short of the final long after the games are in, and the one signal
+that separates the two states is whether the standing has been read again unchanged:
+
+| the standing the page holds | readings | median | p90 | p95 | worst |
+|---|---:|---:|---:|---:|---:|
+| younger than ten minutes | 924 | 0.998 | 1.035 | 1.046 | 1.098 |
+| unchanged for ten minutes or more | 154 | 0.993 | 1.000 | 1.000 | 1.000 |
+
+(the ratio of the final threshold to what the page projected). A board that has held still for
+ten minutes is final, exactly, in every one of the 154 readings; a fresher one is 3 % short
+once in ten and 5 % short once in twenty. The page was quoting ±1 % for both. So the width
+past the close is now measured on the feed and split on that signal (`pace.tail_feed`, written
+by `analysis/live.py`): ±3.8 % while the standing is still moving, ±1.6 % once it has held.
+Only the width changes — the curve keeps the replay's median, which the feed agrees with to
+within a few thousandths and which rests on 2,895 boards rather than 34.
+
+**The centre was already right, and every attempt to raise it made it worse.** The obvious
+reading of "the forecast is behind the board" is that the projection should anticipate the
+rise still to come, so the board's own rate of climb was tried as the projection, alone and
+as a floor, over one game length and over the tail; and the settling curve was tried capped
+and time-shifted while the board was seen to move. On the 1,127 post-close readings the
+shipped projection has a median error of 1.40 % and a bias of +0.28 %; the best of those
+variants read 1.83 % and the rest 2.0–5.4 %, all of them adding bias (+0.7 to +8.5 %) and
+turning 71 readings more than 5 % high into 244 to 436. Splitting by whether the board was
+rising does not rescue them: those rows are not systematically under-forecast either
+(bias +0.17 %). The evening that started this was a genuine tail case — the board gained 18 %
+after the buzzer where the median cup gains 7.6 % — and the honest answer to a tail case is a
+range that contains it, not a centre moved to meet it.
+
+**A threshold never falls.** Whatever the weighing of readings against history says, the final
+threshold at a rank cannot be below what the board already shows there: a team's points only
+rise, and the k-th score of a rising set only rises. That floor now holds the answer and the
+low end of both ranges, and where the rank itself was not read, the nearest deeper rank that
+was serves as the bound. Replaying the 39 evenings, the blend landed under the board it was
+built on in 82 of 10,182 rows, across 23 of the 39 evenings — small, and impossible, which is
+the kind of error worth removing by construction rather than by tuning.
+
+On those 39 evenings the two changes leave the post-close centre where it was (median error
+1.20 % against 1.21 %, bias −0.08 % against −0.05 %) and widen the coverage where it was
+wrong: the 50 % range holds 42 % of the finals against 40 %, the 90 % range 80 % against
+78 %. At the 18:18 reading of the evening in question the page now says 263 points, 50 %
+261–268, 90 % 261–274, and says in words that the last games are still landing and the board
+can only rise from here. Two caveats it also earns: the width is measured on the same 34
+evenings it is used on — split in half by evening it reads ±4.1 % and ±3.5 %, so it is at
+least stable, and `analysis/live.py` re-measures it at every run as the feed accumulates — and
+the live ranges still under-cover overall (the 50 % range holds 27–40 % and the 90 % range
+78–85 % across the session), because the multipliers that turn a half-width into those ranges
+were measured on cold forecasts and have never been measured on live ones. That is the next
+thing to fix, and it needs the replay harness to become a module rather than a scratch file.
+
+**Does the top of the board settle later than its bottom?** A fair question about all of the
+above, and the honest answer is that the shipped tail cannot tell: `curve` pools it over
+ranks 1 to 25 — the rungs whole on every board — and the page reads that one number at every
+rank, so the qualification cut and the top 2,500 are told the games land at the same pace.
+Two stories pull opposite ways. The last game is played harder at the cut, where
+qualification is decided, than at the bottom of the board, where a team with nothing left to
+play for logs off — so the top should gain more. But it is at the bottom that teams are still
+*starting* games at the buzzer, the casual half of an open queue, so the deep end should have
+more still to land.
+
+Measured on the feed's own 26 evenings, at the last reading at or before the buzzer against
+the final:
+
+| rank | 1 | 3 | 5 | 10 | 20 | 25 | 50 | 100 | 250 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| median gain after the close | +9.4 % | +8.2 % | +8.8 % | +9.3 % | +8.5 % | +8.6 % | +8.9 % | +7.6 % | +7.6 % |
+
+Paired inside each cup, which is the test with the power — the same evening's gain at a
+shallow rank against a deep one — the top 20 gains 1.6 points more than the top 250 (median
+over 14 cups, 9 of them in that direction) and the top 50 gains 0.6 points more (10 of 14).
+So the gradient has the sign the pressure story predicts, a size of one point in ten, and no
+support at fourteen cups; and the ranks the question is really about — 500, 1,000, 2,500 —
+cannot be seen at all here, because the feed only reads that deep when it has pages to spare.
+
+So `analysis/live.py` measures the tail per band of rank (1–25, 26–100, 101–500, 500+) on
+the harvest's own replay, where every rank the harvest keeps can be reached and the boards
+number in the thousands. Run over the whole harvest three pages deep — 25,642 readings —
+it answers the question:
+
+| band | +0 | +5 | +10 | +15 | +20 | readings |
+|---|---:|---:|---:|---:|---:|---:|
+| top 1–25 | 0.924 | 0.946 | 0.968 | 0.993 | 1.000 | 17,736 |
+| top 26–100 | 0.921 | 0.939 | 0.960 | 0.982 | 1.000 | 5,333 |
+| top 101–500 | 0.928 | 0.951 | 0.971 | 0.989 | 1.000 | 2,573 |
+| ± top 1–25 | 0.069 | 0.058 | 0.045 | 0.027 | 0.007 | |
+| ± top 26–100 | 0.048 | 0.049 | 0.036 | 0.021 | 0.007 | |
+| ± top 101–500 | 0.098 | 0.090 | 0.076 | 0.055 | 0.006 | |
+
+**The medians say no and the spreads say yes.** The board settles at the same pace at every
+rank: the remaining gain at the close is 8.2 % at the top 25, 8.6 % at the top 100 and 7.8 %
+at the top 500, a spread of one point across bands where the spread *within* a band is seven
+to ten, and not even monotone in rank. Neither the pressure story nor the late-queue story
+survives that. What does survive is the second moment: the deep end is half again to twice
+as unpredictable as the top at the same minute (±9.8 % against ±6.9 % at the close, ±5.5 %
+against ±2.7 % at fifteen minutes). How much the board has left to give is the same
+everywhere; how *sure* that is falls away with depth.
+
+That is worth shipping on its own, and it is where the earlier band was wrong for a deep
+rank. Both widths are now carried and the page takes the wider of the two, because each is
+blind to half the shortfall: the feed's is the total — its board is short because games are
+still landing and because Osirion has not published them — but pooled over ranks on the
+evenings tracked, while the games' clock is per rank on thousands of boards. Adding them
+would count the games twice. Replaying the 39 tracked evenings past the close, the 90 %
+range holds 89 % of the finals against 83 % pooled, and holds evenly across ranks —
+89 %, 89 % and 92 % by band, where the pooled width held 83 %, 87 % and 76 % and the deep
+band was the one that missed. The centre does not move (median error 1.19 % against 1.20 %,
+bias −0.05 % against +0.02 %).
+
+The 500+ band is still empty: three pages read three hundred rosters, so the deepest rung
+measured is the top 250. `--pages 10` reaches the top 1,000, `--pages 25` the top 2,500 —
+all local reading, no network — and the bands fill in as they are reached.
+
+**The lag itself.** None of the above shortens the ten minutes between one reading and the
+next, and at the end of a cup the board moves about a point a minute at the ranks a cup
+qualifies on: a reading ten minutes old is several points behind what a player sees. The feed
+now runs every five minutes instead of ten, and the extra pass reads only the first page —
+the top hundred, where an open queue's cuts sit — and only of the windows inside the last
+twenty minutes of their session or still settling. That is one request per window rather than
+four, so the worst-case staleness falls from about fifteen minutes to about seven for a few
+hundred extra API calls a day rather than double. The page polls every two minutes over the
+same window instead of every five.
+
+---
+
+## The pace of a kind of cup, 13 September 2026
+
+A forecast that was five points short an hour into a cup. At 09:59 on 13 September, fifty-nine
+minutes into the Solo Victory Cup Battle Royale OCE, the page said 157 points for the top 800 —
+the rank that cup qualifies on — with a 50 % range of 154–161 and a 90 % range of 144–173, while
+the board showed 78. The cup ended at 163. Replaying the feed's history of that window through
+the page reproduces the reading exactly (157.7), and the question is whether an hour of readings
+could have said more.
+
+**Where the five points went.** The page extrapolates a reading by the share of its final a
+threshold has typically reached at that minute: at 0.49 of the window the pooled curve says
+0.49, so 78 points became 157. This cup's top 800 was at 0.478 — the extrapolation was 2 % low
+on the pace — and then landed at 0.896 of its final on the hour where the curve says 0.924,
+another 3 %. Its top 50 did the opposite: 0.513 at the same minute, five points *ahead* of the
+curve, and the forecast there ran 5 % high. Inside one cup the top of the board and the
+qualification cut went opposite ways, which is what the 90 % range is for, and 163 sat inside
+it. But the second shortfall — a two-hour Battle Royale cup landing at 0.90 on the hour, not
+0.92 — is not noise, and it is the thread the rest of this pulls.
+
+**The material.** The database now holds 145 evenings the feed followed with a final to
+score them against, 110 of them open queues, 13,959 readings over nine days; and 512 boards of
+the harvest since August replayed game by game from each roster's own session times, 369 of
+them first-round open queues of at least fifty rosters. Everything below is measured on those
+two, and every change is scored on the feed's evenings by a rolling backtest: the model of the
+morning of 5 September, and for each day only the boards replayed and the evenings followed
+before that morning. The page code is the page's own, driven by a headless browser.
+
+**Cups of a kind do not run alike.** Pooled over every open queue, the curve is a median of
+cups whose pace differs by a tenth. Replayed per family — game mode, team size, window length,
+game cap — the share reached at half time runs from 0.42 (Battle Royale Duos, two hours, eight
+games) to 0.53 (Zero Build Duos, three hours, eleven), and the share on the hour from 0.865 to
+0.938: a two-hour Battle Royale cup has a thirty-minute game still in the air at the buzzer, a
+Reload cup capped at ten short games has nothing left to play in its last half hour. Asked the
+page's own question — a reading at share *s* extrapolated by the curve, against the final,
+each cup scored with a curve measured on the others — the family's curve is wrong by a third
+less than the pooled one at the top 25 (median error 2.98 % against 4.56 % at half time, 1.82 %
+against 3.37 % at seven tenths; ninetieth centile 7.6 % against 13.3 %) and carries no bias
+where the pooled curve carried −2 to −3 %. A cup's own recent editions are the sharper unit
+still, because a kind of cup drifts by the width of a family inside a month: the Console Zero
+Build Solo Victory Cup ran at 0.45 at half time in early August and 0.49 in September. So the
+model now carries the curve and the tail of each family that has thirty boards, and of each cup
+that has four editions, both from the most recent, and the page reads the cup's own row first,
+its family's next, the pooled curve last. Each is read from three tenths of the session on and
+ramps in over the tenth before: earlier the board holds a game or two, the curves are a few
+hundredths apart and the spread of a reading already says more — read from the start, they
+made the first third of the session worse.
+
+**What the harvest cannot see.** Compared cup for cup on the same evenings, the feed's board and
+the harvest's replay of it agree at the top 25 to within a point at every tenth — and disagree
+by 4 to 9 % at half time in one kind of cup. The harvest replays a board from the rosters that
+finish in its first three pages, and mid-session that is not the board there was: in a casual
+Solo cup the players at the top at half time who then stop playing finish outside those pages
+and are not on disk, so the replayed 25th place at half time runs low. In a divisional practice
+where every team plays every game there is no such turnover and no such gap. So a category's
+curve is also measured on the feed's own evenings, from the top 25 the feed read, and the page
+prefers that row once four evenings of the cup have been followed; the harvest answers for the
+cups the feed has not followed yet, and for the families. On the evenings of 8 to 13 September
+this is the change that mattered most: the same code with the harvest's category rows alone
+took the median error at half time from 7.2 % to 6.7 %, with the feed's rows to 6.4 %.
+
+**The deep end runs on its own clock, and it is the depth into the field that sets it.** The
+curve is measured on the top 25, the rungs whole on every harvested board, and the harvest
+cannot measure a deep rank mid-session at all — with three pages read, the 250th best at half
+time is the 250th of three hundred rosters, a third low. The feed can, and on its evenings the
+ratio of a band's share to the top 25's at the same reading is not a property of the rank:
+the thousandth of a field of two thousand is the casual half, players who play their few games
+early and stop, and its threshold is a fifth further along at two thirds of the session than
+the top 25 and all but done by the last fifth; the thousandth of a field of ten thousand is the
+top tenth and keeps the top's pace to within a few per cent. Measured per band of
+*q* = rank / field on 110 evenings:
+
+| q | 0.3 | 0.4 | 0.5 | 0.6 | 0.7 | 0.8 | 0.9 | 1.0 | evenings |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 0.02–0.05 | 0.96 | 0.98 | 0.99 | 1.00 | 1.00 | 1.01 | 1.00 | 1.00 | 90 |
+| 0.05–0.10 | 0.92 | 0.96 | 0.99 | 1.00 | 1.01 | 1.01 | 1.02 | 1.02 | 76 |
+| 0.10–0.20 | 0.90 | 0.98 | 1.01 | 1.02 | 1.04 | 1.04 | 1.04 | 1.04 | 56 |
+| 0.20–0.50 | 0.88 | 0.95 | 1.06 | 1.05 | 1.07 | 1.09 | 1.07 | 1.04 | 36 |
+| 0.50–1.00 | 0.84 | 0.98 | 1.09 | 1.16 | 1.18 | 1.20 | 1.11 | 1.10 | 23 |
+
+The page multiplies the curve by it from four tenths on, ramping in over the tenth before,
+where the ratio crosses one steeply and a reading's own spread says more. Which needs the
+field — and a first round's field is not in the calendar. The cold forecast guesses it from the
+cup's editions, and on the evenings followed that guess was out by half or more for one cup in two.
+The board's own page count is a better number: a hundred rosters a page, so the count of who
+has played so far, which the feed already read and now keeps with every reading, exact to the
+roster on a full pass since the feed reads the last page too — up to the API's hundredth page, past which the board reads "ten thousand or more", the same ceiling every
+harvested field of that size records and the depth ratio was measured against (Osirion's own
+site counts players from the games it parses and can say fifteen thousand where the
+leaderboard stops at ten). On the
+harvest's replays nine rosters in ten have a game in by a third of the window, so from there
+the count stands in for the field, and the page shows it under the progress bar. That is the
+answer to a question asked this week — whether it is worth knowing how many played at each
+reading. It is: the depth of a rank is measured against it, the size of the field is what the
+cold forecast is most often wrong about, and the arrival itself — when the field fills — is a
+clock the pace curve may be told by, once enough evenings carry the count to measure it.
+
+**How wide a live answer has to be.** The multipliers that turn a half-width into a range were
+measured on cold forecasts and applied to live ones, and the live 50 % range held a quarter of
+the finals mid-session where it claimed half. They are now measured on the feed's evenings too,
+in units of the reading's own half-width, by share of the session and past the close, and apart
+for the deep end, where the answer is both wider and, so far, skewed: the extrapolation lands
+high more often than low there, which the ranges now say.
+
+**Four ideas measured and left out.** The games' clock: the share of the final against the
+games played by the rosters standing around the rank, which would adapt to any format by
+itself, is *less* telling than the wall clock (median error 6 to 8 % against 2 to 3 % at the
+top 25), because the rosters at a rank at half time are the ones who queued fastest, which is
+not the population's pace. The trend of the extrapolation: a cup's deviation from its curve
+persists through the session (0.77 between three tenths and half time, 0.59 between half time
+and nine tenths), but the slope of the extrapolated forecast over the readings so far explains
+a twentieth of what is left (standard deviation 0.038 to 0.036 at six tenths). The same day's
+other regions: the earlier region's deviation predicts the later one's with a correlation of
+0.36 at half time and 0.06 at nine tenths. The exact field for the cold prior: handing the page
+the harvested field instead of the calendar's nothing moved the median error by a tenth of a
+point. And two fallbacks tried and withdrawn: a family read by game mode and window length
+alone (the Arenas ten-game cups priced the Solo Victory Cup's eight-game one at 173 for a final
+of 163), and a family's own spread in place of the pooled one (measured on thirty boards it is
+narrow early, the readings outweighed the history before they were worth it, and the 90 %
+range held a third of the finals).
+
+**What it comes to.** Rolling backtest on the 110 open-queue evenings, every rank with a
+final, the page's blended answer, median absolute error and the share of finals inside the
+two ranges (before → after):
+
+| share of the session | median error | 50 % range holds | 90 % range holds |
+|---|---:|---:|---:|
+| 0.1–0.3 | 3.5 % → 3.6 % | 62 → 61 % | 98 → 98 % |
+| 0.3–0.5 | 5.0 % → 4.2 % | 37 → 42 % | 85 → 85 % |
+| 0.5–0.7 | 4.7 % → 3.6 % | 22 → 29 % | 73 → 78 % |
+| 0.7–0.9 | 3.0 % → 2.5 % | 33 → 39 % | 85 → 87 % |
+| 0.9–1.0 | 2.1 % → 1.8 % | 44 → 48 % | 89 → 90 % |
+| 0–10 min past the close | 2.1 % → 1.4 % | 34 → 45 % | 82 → 88 % |
+| 10–20 min past the close | 1.3 % → 1.0 % | 39 → 47 % | 85 → 89 % |
+
+By rank, the top 26 to 100 — where most cuts sit — gain the most: 5.2 → 3.6 % at three to five
+tenths, 4.9 → 3.2 % at five to seven, 2.6 → 1.9 % at seven to nine, 1.5 → 1.0 % in the ten
+minutes after the close. The ranges are still short of what they claim mid-session, for a
+reason the numbers above show rather than hide: on the last three days the cups the feed had
+followed fewer than four times — the Weezy Icon Cups, the Mega Man cups — ran 4 to 10 % ahead
+of the families they fell back on, and no width fixes a centre. That gap closes by itself as
+the feed follows them, which is what the feed-measured rows are for. Beyond the top 500 the
+answer is still 7 to 9 % high mid-session on the evenings so far, on a q measured against a
+guessed field; the board's own count should do better from here on, and cannot be replayed yet
+because the readings before today did not carry it.
+
+**And the cup that started this.** With every table above measured on the boards and evenings
+before that morning, the page would have said 155 for the top 800 at fifty-nine minutes rather
+than 157 — this cup's deep end ran behind its editions' — and 158 at the buzzer, 162 ten minutes
+on, 164 at a quarter past, where it had said 157, 157 and 159. The five points at the hour were
+the tail of a two-hour cup, and that part is measured now. The two at fifty-nine minutes were
+this cup's own; on 362 replayed cups nothing the board shows at half time — its trend, its
+leaders' game count, its sister regions' evening — tells more than a third of that, and a
+forecast that pretended otherwise would be a narrower range that holds fewer finals.
+
+`analysis/live.py` measures all of it and `pace.json` carries it; `pull_live` files the page
+count with each reading; the worker keeps it in the day's history.
+
+## The first edition of a season, 13 September 2026
+
+A forecast that was wrong before the cup began. At 17:00 on 13 September, as the Solo Victory
+Cup Battle Royale EU opened, the page said 156 points for the top 4,000 — the rank that cup
+qualifies on — and the previous edition, on 5 September, had ended above 206 at that rank (the
+feed's last reading, seventeen minutes after the close, with the board still rising). Nothing
+about the cup was unknown: the week before was in the database. The number came from a
+hand-typed row of 25 July, the last edition of season 41, and the reasons it did are three,
+each of them structural rather than a bad night.
+
+**The rank the cup is played for was not a rank the harvest recorded.** The harvest reads
+fifteen fixed ranks — 1 to 250 on the first pass, three pages deep, 500 and beyond on the later
+passes that take days to come round — and the qualification cut of a Solo Victory Cup sits at
+4,000, on page forty. The 5 September edition sat in the database with its top 250 and nothing
+below, so the model's first rung, which reads "this cup, this rank, last time", read rank 4,000
+off the last edition that held it: four rows typed by hand in June and July, 143 to 178 points,
+the latest 156. The rung's band said 22 % either way, which is what four editions a season apart
+disagree by, and the centre was a season old.
+
+**Epic renamed the cup, and the model's categories are keyed on the name.** "Solo Victory Cup"
+became "Solo Victory Cup Battle Royale" at season 42, "Console Solo Victory Cup (ZB)" became
+"Console Zero Build Solo Victory Cup", "FNCS Division 2" became "FNCS Division 2 Practice"; the
+event id's series key — `SoloVictoryCup`, `ConsoleVCC_SolosZB`, `FNCSDivisionalCup_Division2` —
+did not move. Under the new name the cup had one harvested edition and the four typed rows;
+under the old one, 142 editions across seven regions that nothing on the calendar would ever
+match again. On this database 2,790 rows sat under 23 former names. Every first edition of a
+renamed cup in season 42 started cold, at the scoring-table rung and its 14 %, with a season of
+history a name away.
+
+**The model had no notion of a season.** Read across a turn of season, the previous edition
+was read as if nothing had changed. Measured on every category that ran in two consecutive
+seasons (its last edition of the one against its first of the next, same number of games, ranks
+worth less than a quarter of rank 20 left out as the bottom of a small board):
+
+| turn of season | pairs | rank 20 | rank 100 | rank 250 | rank 500 | rank 1000 | rank 2500 |
+|---|---|---|---|---|---|---|---|
+| 39 → 40 | 18 | +4.9 % | +4.6 % | +6.1 % | +8.4 % | +13.2 % | +22.8 % |
+| 40 → 41 | 43 | −0.4 % | −0.4 % | −0.5 % | −0.5 % | +0.0 % | −3.2 % |
+| 41 → 42 | 41 | +4.4 % | +5.8 % | +6.7 % | +9.3 % | +11.2 % | +11.6 % |
+
+Medians of the move; within a season, consecutive editions of a cup move by 2.5 % at rank 20
+and 4.4 % at rank 1000 (median absolute deviation). A turn of season is a shift shared by
+every cup — at 41 → 42, 78 % of the categories moved up at rank 20 and 91 % past rank 500, in
+every region — and larger at depth, where a bigger crowd lifts the deep ranks more than the
+top. Or nothing at all, as at 40 → 41. It cannot be known before the season's first cups have
+run; it can be read off them for the cups that come after.
+
+**What changed.** The harvest fetches the page each cut falls on with its first pass — one
+request per cut — and records the cut's rank beside the fixed fifteen, so the latest edition
+carries the rank it was played for; a window is derived again, in place, when more of its pages
+are on disk than the last derivation read, so the deeper passes and the cuts' pages reach the
+database at the next build rather than at the next change of naming rules, and a rebuild no
+longer deletes the rows — an earlier version did, and took the feed's readings of every cup
+with them. Every edition of a series is filed under the name Epic gives the cup now, keyed on
+the series id, hand-typed rows under a former name following; the objectives entered under the
+old name move with it. The feed's settled board — twenty minutes past the close, the rule the
+pace analysis already used — is filed as the final at the ranks the harvest holds nothing for,
+which is the cut most weeks, until the harvest's own page replaces it. And the model dates every
+edition it reads into its season: each rank of the previous-edition table carries the season
+and date of the edition it was read off, the model carries the seasons the history spans and,
+per turn of season and per band of rank (to 100, to 500, deeper), the median move shrunk by
+n / (n + 10) readings and the 80th percentile of what the move leaves; a reading carried across
+a turn of season is moved by the shift and its band widened by that spread, and a turn no cup
+has crossed yet moves nothing and widens by the spread every past turn showed (15 to 18 %). The
+level rung moves the same way. One more rule was measured on the way: the edition read under
+the same entry bar as the cup coming up is read only when it was played in the same season as
+the latest — on the 58 editions where the two differ, a same-bar edition a season back reads
+worse than last week's under the other bar at every band (4.8 / 4.7 / 6.3 / 14.7 % against
+4.7 / 4.4 / 5.8 / 13.8 %), and better only within the season (2.7 % against 6.4 % at the top 25).
+The page says which edition a rank was read off when it is not the latest, and what the turn of
+season did to it.
+
+**Measured.** The season shift alone, out of sample on the last three turns of season — each
+first edition of the new season forecast from its last edition of the old, the shift known only
+from the categories whose first new-season edition fell on an earlier day, 470 readings: the
+top hundred 3.8 → 3.6 % median error, ranks 101–500 5.3 → 4.8 %, deeper 8.7 → 8.1 %; at 41 → 42,
+5.0 → 4.2, 8.1 → 4.9 and 11.1 → 8.1 %; at 40 → 41, which did not move, 2.6 → 2.7, 2.8 → 3.9 and
+6.1 → 7.2 %, the cost of a shift measured on noise, which the shrinkage bounds. The whole cold
+model, `analysis/validate.py`'s rolling forecast of the newest 600 tournaments on this
+database: median error 4.7 → 4.1 %, coverage 93 → 92 % of an 80 % band, by band 5.9 → 5.3 %
+(ranks 1–5), 3.7 → 3.1 (6–25), 3.3 → 3.2 (26–100), 4.6 → 4.0 (101–500), 10.8 → 10.5 (deeper).
+Most of that is the renamed history: the same code on the old names reads 4.7 % and on the
+unified names 4.2 %, with 322 more rows answered by a previous edition and 204 fewer by the
+scoring table alone. The season shift is the rest, and it lands where it should: on the 62
+tournaments that were the first edition of their cup in season 42, 607 rows, 3.83 → 3.45 %
+with the bias −1.9 → −0.6 % and the band's coverage 82 → 93 %; by band 5.9 → 3.8 % (101–500,
+bias −2.6 → 0.0) and 10.4 → 8.9 % (deeper, −8.7 → −4.3); on 29 August, the Console cups' first
+day, 8.8 → 6.1 %, on 5 September 4.3 → 2.5 %, and on 25 August, the first day with anything to
+measure a shift on (two categories), 3.4 → 3.6 %. Everything else is unchanged to the decimal.
+
+**And the cup that started this.** With the history unified and the seasons in, the page would
+have opened at 169 for the top 4,000 rather than 156 — the 25 July row moved by the +8.5 %
+the season's deeper ranks had shown — and, with the 5 September edition read at that rank, which
+is what the cut's page gives, at 212 with the band widened for the other entry bar. The board
+read 179 at the buzzer and was still climbing.
+
+**Left.** The first day of a season still carries the previous one forward, band widened; the
+deep band's move is the noisiest and the shrinkage bounds it rather than fixes it. A cup
+renamed keeps its whole history under its newest name, which files last season's real FNCS
+division cups under "Practice" — right for the model, odd on a list. The cuts' pages of past
+windows arrive with the next shallow pass, one request per window that has a cut, and the
+build derives those windows again as they land.
+
+`harvest_osirion.py`, `pull_live.py` and `calibration.py` carry it; `export_model.py` packs the
+seasons and the page reads them; `analysis/validate.py` measures the whole.
+
+---
+
+## A cup nobody has seen, 20 September 2026
+
+Two complaints, both right. A skin cup that pays the win 60 and the kill 2 was priced at 161
+points before it ran, at a rank where 150 is what three hours of ordinary games make; and the
+forecast of a cup under way drifts, down through the middle of the session and back up towards
+the end, or the reverse, by more than the readings move. The first is the cold start: the
+model's last rungs read a *level* off the scoring table — a share of the maximum game score,
+measured on cups of the same kind — and a share is one number for a whole family of tables.
+On the 46 cups since mid-August that had no edition anywhere, the scoring rung ran 13 % low at
+ranks 1–5 and 8 % low at 26–100 on Battle Royale, 15 to 22 % low on mobile, 17 % high on Reload,
+and at depth it collapsed: 423 at rank 20 and 37 at rank 1,000 for a Trio cup whose board read
+546 and 331. The second is the pace: which curve says how far along a board is at a given
+minute, and for which cups.
+
+**Replaying the boards.** What a harvested board says is finer than a level: every roster's
+placement and eliminations in every game it played, with the time each game ended. Re-scored
+under the new cup's table — this placement worth that many points, these kills at that rate,
+capped where the table caps them, the first *n* games in the order they were played where the
+cup allows *n* — the same games give the standings the new table would have produced, and rank
+20 of those standings is a forecast for rank 20 of the new cup. This is the "average tournament
+of a top-x roster", replayed rather than modelled: the same evenings, the same lobbies, another
+table, so a table that rewards placement over kills or the reverse is priced by what those
+players actually did, not by a share. It also answers the objection to any average: a roster
+that takes second place eight times and one that takes a win and seven top-hundreds are two
+rosters, and each is re-scored as itself. Donors are the six most recent boards of the same
+region, team size, game mode and platform (mobile, console, PC — read off the name, as the cold
+signature reads it), open queues only, the one-lobby formats left out (`arena`, `evaluation`,
+`test cup`, `ranked cup`: a first version took them in and priced a Battle Royale cup off an
+Arena test lobby, 35 % high); those played to the same number of games first, the others scaled
+by the measured per-game exponent, 0.93. The median across donors is the reading; its band, the
+80th percentile of its error on the cups below, is 12 %.
+
+Two limits, both measured. A donor board is loaded three pages deep — three hundred rosters —
+and the re-ordering pulls up rosters from below the pages held: on the same cups, ranks 101–250
+of a 300-roster replay ran 9 % low. So the table is trusted down to a third of the rosters
+loaded, rank 100 for three pages, and the harvest now reads the last three weeks' windows ten
+pages deep on every pass — seven more requests per window, the boards the replay is made of,
+which puts rank 250 within reach. Past that depth the forecast continues from the deepest rank
+read along the ladder below. And a replay under another table than the form's is no reading:
+the table carries the signature of the scoring it was replayed under and the page reads it only
+while the form matches.
+
+**The ladder.** The shape that continued the level past the ranks a cup's own editions reach was
+the fitted curve, `exp(-a q^b)` per band of field size. Measured on 416 open-queue boards played
+after 15 August and read from the ones before, its ratio to rank 100 ran 9 % low at rank 500,
+13 % low at 1,000 and 8 % low at 2,500 — a fifth to a third low for fields of one to three
+thousand. Two parameters cannot bend both ends of a ladder. The ladder is the pooled shape that
+carries the field: every open-queue board of the same band of field size and game mode, its
+thresholds relative to rank 20 at the harvest's fifteen fixed ranks, one median per rank, at
+least twenty boards a rank, the game mode's row first and the band's row across game modes as
+the fallback, none below three hundred teams where the curve fitted on those small queues reads
+better. The bands are finer than the curve's four — eleven, edges at 300, 450, 650, 1,000,
+1,400, 2,000, 3,000, 4,500, 6,500 and the API's ceiling — because rank 1,000 is the last place
+of a 1,100-team queue and the middle of a 2,900-team one, and one median for both read 0.21 of
+rank 20 where the two ends read 0.10 and 0.40, with a spread of 87 % to say so. On the same
+split, 472 boards, relative to rank 20: rank 100 4.7 → 2.3 % median error, rank 250 7.1 → 3.7,
+rank 500 12.2 → 5.6, rank 1,000 18.6 → 9.6, rank 2,500 19.2 → 17.6, the bias within a point
+of zero where it was −4 to −15. On the rolling validation of the whole model (5,929 thresholds)
+the ladder changes 1,849 of them and the medians barely move — 6.5 → 6.1 % at ranks 1–5,
+10.4 → 10.2 deeper, 4.79 → 4.85 over everything, the coverage 92 → 93 % — because a shape is
+only half of a threshold: on the cups priced off the scoring table the shape error halves
+(6.9 → 3.5 % at 26–500, bias −4.2 → −0.1; past 500 −10.8 → +5.6) while the level's bias, which
+the old curve's bias had been cancelling on Reload, now shows. The level is the replay's job.
+
+**Together, measured.** `analysis/rescore.py` takes the cups since 15 August that the rolling
+validation priced off the scoring table or the family — 102 open queues, every one of them
+forecast from boards played before its day — and replays each under its own table:
+
+| rank band | thresholds | replay, median error | replay, bias | the model's cold rungs | bias |
+|---|---|---|---|---|---|
+| 1–5 | 306 | 4.8 % | +1.3 % | 8.1 % | −2.1 % |
+| 6–25 | 307 | 3.8 % | +1.6 % | 9.0 % | −1.8 % |
+| 26–100 | 230 | 3.7 % | +0.2 % | 10.0 % | −3.9 % |
+| 101–250 | 225 | 4.2 % | −0.5 % | 10.2 % | −2.6 % |
+| 251–1000 | 99 | 6.2 % | −0.3 % | 11.4 % | +5.5 % |
+| 1001 and deeper | 10 | 15.9 % | −12.8 % | 18.6 % | +11.5 % |
+
+The bands past 100 are the replay continued along the ladder from the deepest rank read — a
+hundred with the three-page boards this was measured on; the last row is ten thresholds of
+ten cups and says little either way. On the cups that had
+already run in another region, half of the family's reading and half of the replay's, in log
+terms, beat either alone — 3.5 % against 5.9 and 6.5 on the seven day-two cups of the sample —
+so that is the rule where both exist; the cup's own editions in its own region still come
+first, untouched. The model's mobile bias goes with it: mobile cups 14.5 → 5.7 % at ranks 1–100.
+`calendar_snapshot.py` writes the replay beside every row of the week whose cup has no finished
+edition in its region — a dozen numbers per cup, never a board — and the page reads it as one
+more rung between the cup's own editions and the scoring table, saying which boards it rests
+on and to what depth. `calibration.replay_reading` and the export's port agree with the page to
+the rounding on every branch, the same check as the rest.
+
+**The pace, by kind of cup.** The feed's own evenings answer the second complaint. On the week
+of 14 September, replayed through the page with the tables of the week before, the forecast at
+mid-session was 3.9 % off in median and unbiased on aggregate — no dip and no rise across the
+86 evenings together — and wrong in two places by construction. A mobile Reload cup read its
+own pace off its June editions, replayed from the harvest, and that row said the board was
+complete at seven tenths of the session: the forecast ran 27 % under the final at that point
+and climbed back. And within one family of format, the cups do not queue alike: at half the
+session, ranks 1–25, the FNCS Duo practice cups had reached 45 % of their final where the skin
+cups of the same 180-minute, 11-game format had reached 56 %, so a family pooled over both —
+fifty FNCS evenings to seven — priced a new skin cup high at mid-session, 7 % on the Kingdom
+Hearts cups, and let it fall for two hours. The family rows are now kept per kind of cup and platform as well as
+pooled, the page reading the kind's row first; a category's replayed pace counts as the cup's
+own only while its editions are within 45 days and of the same length and game count, else the
+family's answers. Measured out of sample on the week's 67 evenings, from the evenings before:
+median error at mid-session 2.8 → 2.5 %, the 90th percentile 7.9 → 7.1 %, the skin cups' bias
++1.7 → +0.4 %, the mobile Reload cup −19 → +5 %. The pace tables are replayed by the refresh
+itself every three days from now on, so the feed's evenings of a cup's week reach its row before
+its next week.
+
+**Cups the feed never followed.** The feed reads the cups on the published calendar, and the
+calendar was written by the machine that harvests, when it ran: a cup Epic announced between two
+runs ran unfollowed, and an evening the feed did not sit through cannot be recovered. The
+predictor repository's own workflow now refreshes the calendar every three hours — Osirion's
+public calendar, eight requests, the same derived rows — keeping the replay cells the machine
+wrote for the rows still listed, and the refresh on the machine takes those commits in before
+writing, settling a conflict on the generated files by keeping its own. The page says, on a cup
+that is over with nothing from the feed, that the cup was not on the calendar while it ran.
+
+**Left.** The replay's donors are the region's own boards; at the start of a season the first
+cold cups replay boards of the season before, unmoved by the season shift the direct rung
+applies — a week of the new season and the donors are new too. The ladder past rank 2,500
+rests on the few hundred boards read that deep. The kind's pace row needs eight boards of its
+kind and format before it exists; a new format's first evenings read the pooled row.
+
+`rescore.py` and `calendar_snapshot.py` carry the replay, `calibration.py` the ladder and the
+rung, `analysis/live.py` the pace by kind, `analysis/rescore.py` the measurement.
 
 ---
 
@@ -348,6 +1046,27 @@ so the baselines answer nothing.
 
 Too wide in the middle, about right in the tails — errors fatter-tailed than the
 normal the band assumes.
+
+So the page no longer assumes it. `validate.py` now reports the quantiles of the
+standardised error itself — u = log(truth / forecast) / rel, on every held-out
+threshold — and the model carries them as `quality.bands`, in units of the band the
+forecast quotes:
+
+| share of cups inside | interval, in units of the quoted band |
+|---|---|
+| 50 % | −0.32 … +0.45 |
+| 80 % | −0.81 … +0.85 |
+| 90 % | −1.28 … +1.09 |
+
+(5,290 held-out thresholds, September 2026.) The 80 % row recovers the band the page
+used to draw single-handed — ±0.83 of itself — which is the same statement as "85 %
+coverage for a claimed 80 %", read from the other end. The page shows the 50 % and the
+90 % rows: a range that is right half the time is worth more to a player than one that
+is right nine times in ten and four times as wide, and quoting both says which is which.
+They are asymmetric because the error is: log-normal-ish with a right tail, a threshold
+can double and cannot go below zero. The multipliers are measured on the cold forecast,
+where the held-out test lives; the live blend quotes its own `rel` and the same shape is
+applied to it, which is an assumption the live models cannot yet test.
 
 ![Band calibration](../analysis/figures/coverage.png)
 *Figure regenerated on the September 2026 harvest (`python -m analysis.figures`); the text of this section describes the original 66-tournament study.*

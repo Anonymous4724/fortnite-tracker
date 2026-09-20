@@ -161,11 +161,15 @@ def forecast_by_anchor(comps: list[dict] | None = None) -> pd.DataFrame:
     """
     comps = comps if comps is not None else data.load()
     frames = []
+    # Eight replays of the whole validation. The frozen split, not the
+    # rolling one: the question is which anchor rank forecasts best, a
+    # comparison between runs on the same rows, and the frozen split answers
+    # it in half the time.
     for rank in CANDIDATES:
         with anchored(rank):
-            cv = validate.cross_validate(comps)
+            cv = validate.cross_validate(comps, rolling=False)
         frames.append(cv.assign(anchor=str(rank)))
-    frames.append(validate.cross_validate(comps).assign(anchor="shipped"))
+    frames.append(validate.cross_validate(comps, rolling=False).assign(anchor="shipped"))
     out = pd.concat(frames, ignore_index=True)
     # Ordered so the tables read up the ladder rather than alphabetically, where
     # rank 100 lands between 1 and 20.

@@ -32,7 +32,7 @@ print("\n1. every module imports")
 for mod in ("app", "db", "calibration", "predict", "cito", "tracking", "team_stats",
             "scoring_infer", "i18n", "backtest", "cleanup", "check_forms",
             "osirion", "harvest_osirion", "calendar_snapshot", "export_model",
-            "refresh", "import_session", "pull_live"):
+            "refresh", "import_session", "pull_live", "rescore"):
     code, out = run(f'"{PY}" -c "import {mod}"')
     check(mod, code == 0, out.strip().splitlines()[-1] if code else "")
 

@@ -18,13 +18,16 @@ complexity:
     carry     the same category's nearest other edition, same rank
     median    the median of the same category's other editions, same rank
 
-    python -m analysis.validate
+    python -m analysis.validate            # rolling forecast, the default
+    python -m analysis.validate --frozen   # every target from the pool alone
+    python -m analysis.validate --random   # leave-one-out, no time order
 """
 from __future__ import annotations
 
 import json
 import os
 import random
+import sys
 from datetime import date
 
 
@@ -75,6 +78,17 @@ SAMPLE = 600
 # came before. The random split is kept as --random for the learning curve and
 # for comparison, but it is not how a forecast should be scored.
 CHRONO = True
+# Rolling origin: each held-out tournament is forecast from the pool *and*
+# every held-out tournament that started on an earlier day, which is what the
+# app has on the night - last week's edition is in the database by then. The
+# frozen split (--frozen) forecasts all 600 from the pool alone, so a weekly
+# cup's fifth week is priced off the season before, and every edition of a
+# cup born inside the window counts as a cold start. Measured on the same 600
+# tournaments, that alone reads as 12.9 % median error against 6.8 %, and
+# 58 % of the rows cold against 34 %: numbers about the split, not the model.
+# The day is the grain: a cup is forecast from nothing that started on its own
+# day, so an evening's other regions never inform it.
+ROLLING = True
 # Everything that is not a target. Capping this at fifteen hundred was a mistake
 # that ran for a whole afternoon: the model read its level, field and shape
 # tables from the pool while the carry-forward and median baselines read every
@@ -136,8 +150,19 @@ def information_note(comps, targets, pool) -> str:
             f"{len(comps)}.\n  The comparison is not like for like — raise WIDE_CAP.")
 
 
-def cross_validate(comps: list[dict] | None = None, progress: bool = True) -> pd.DataFrame:
-    """Cold prediction for every (tournament, rank) with the tournament held out."""
+def day_of(comp: dict) -> str:
+    return str(comp.get("start_time") or "")[:10]
+
+
+def cross_validate(comps: list[dict] | None = None, progress: bool = True,
+                   rolling: bool | None = None) -> pd.DataFrame:
+    """Cold prediction for every (tournament, rank) with the tournament held out.
+
+    `rolling` (default ROLLING) forecasts each target from the pool plus the
+    targets of earlier days; the curve is fitted once, on the pool, so the
+    shape never sees a target. Frozen, every target reads the pool alone.
+    """
+    rolling = ROLLING if rolling is None else rolling
     conn = data.connect()
     try:
         comps = comps if comps is not None else db.all_full(conn)
@@ -145,10 +170,22 @@ def cross_validate(comps: list[dict] | None = None, progress: bool = True) -> pd
         # One fit for the run when the pool holds no target, one fit per target
         # otherwise. See the note on SAMPLE.
         shared = calibration.broad_stats(pool) if pool is not None else None
+        rolling = rolling and pool is not None and CHRONO
+        if rolling:
+            targets = sorted(targets, key=day_of)
+        past, day, broad = list(pool or []), None, shared
         rows = []
         for done, target in enumerate(targets):
             if progress and pool is not None and done and not done % 50:
                 print(f"  ... {done}/{len(targets)} tournaments replayed", flush=True)
+            if rolling and day_of(target) != day:
+                # A new day: everything that started before it joins the tables.
+                # The curve is the pool's, not refitted - see broad_stats.
+                if day is not None:
+                    past += [c for c in targets if day_of(c) == day]
+                    broad = calibration.broad_stats(past, curve=shared["curve"],
+                                                    curves=shared["curves"])
+                day = day_of(target)
             # A threshold of zero is not something a multiplicative model can be
             # right or wrong about, and dividing by it turns every mean in this
             # file into inf. Dropped here and counted in the report, rather than
@@ -159,8 +196,12 @@ def cross_validate(comps: list[dict] | None = None, progress: bool = True) -> pd
                 continue
             history, scope, exact = calibration.comparable_history(
                 conn, db, target, exclude_id=target["id"])
-            if shared is not None:
-                calib = calibration.calibrate(history, sorted(finals), broad=shared)
+            if rolling:
+                # The narrow circle too reads only the past: a label that said
+                # "3 editions" would otherwise count next week's.
+                history = [c for c in history if day_of(c) < day]
+            if broad is not None:
+                calib = calibration.calibrate(history, sorted(finals), broad=broad)
             else:
                 # `wide` feeds the curve fit. Leaving the target in it would let
                 # the tournament shape its own prediction through the back door —
@@ -203,7 +244,7 @@ def cross_validate(comps: list[dict] | None = None, progress: bool = True) -> pd
 # Baselines
 # --------------------------------------------------------------------------- #
 def add_baselines(cv: pd.DataFrame, comps: list[dict] | None = None,
-                  history: list[dict] | None = None) -> pd.DataFrame:
+                  history: list[dict] | None = None, rolling: bool = False) -> pd.DataFrame:
     """Carry-forward and category-median predictions for the same rows.
 
     `history` is what the baselines may read. In the chronological split it is
@@ -211,12 +252,15 @@ def add_baselines(cv: pd.DataFrame, comps: list[dict] | None = None,
     previous edition. Given everything, it becomes the *nearest* edition in
     either direction, which reads next week's result to forecast this week's:
     measured, that alone is worth a point of median error nobody can have on
-    the night.
+    the night. `rolling` reads everything that started before the target's
+    day, the same rule the model is held to.
     """
     comps = comps if comps is not None else data.load()
     history = history if history is not None else comps
-    key = {c["id"]: (c["kind"], c["region"]) for c in comps}
+    key = {c["id"]: (c["kind"], c["region"], c.get("team_mode") or "", c.get("game_mode") or "")
+           for c in comps}
     when = {c["id"]: pd.Timestamp(c["start_time"]) for c in comps}
+    day = {c["id"]: day_of(c) for c in comps}
     readable = {c["id"] for c in history}
     finals = {c["id"]: {int(r): float(v) for r, v in (c.get("finals") or {}).items()
                         if float(v) > 0}
@@ -231,7 +275,8 @@ def add_baselines(cv: pd.DataFrame, comps: list[dict] | None = None,
             bucket.setdefault((key.get(cid), rank), []).append(cid)
 
     def peers(cid, rank):
-        return [o for o in bucket.get((key.get(cid), rank), ()) if o != cid]
+        return [o for o in bucket.get((key.get(cid), rank), ())
+                if o != cid and (not rolling or day[o] < day[cid])]
 
     def carry(cid, rank):
         """Nearest other edition in time; earlier wins a tie."""
@@ -504,6 +549,9 @@ def data_health(comps: list[dict]) -> list[str]:
         out.append(f"the fitted exponent b stopped at {calibration.LAST_FIT['railed']}, "
                    f"the edge of the search grid.\n    The optimum was never bracketed — "
                    f"the shape below is the boundary, not a fit.")
+    for lo, hi, at in calibration.LAST_FIT.get("railed_bands") or ():
+        out.append(f"the curve for fields of {lo}-{hi or 'more'} stopped at b = {at}, the edge "
+                   f"of the search grid;\n    that band's shape is the boundary, not a fit.")
     return out
 
 
@@ -523,10 +571,19 @@ def write_summary(summary: dict) -> None:
     print(f"\nWrote {os.path.relpath(SUMMARY_PATH)} — the export carries it into model.json.")
 
 
-def report() -> None:
+def report(rolling: bool | None = None) -> None:
     comps = data.load()
     targets, pool = split(comps)
-    if pool is not None and CHRONO:
+    rolling = (ROLLING if rolling is None else rolling) and pool is not None and CHRONO
+    if rolling:
+        first = min(str(t.get("start_time") or "") for t in targets)[:10]
+        print(f"{len(comps)} tournaments in the database. Forecasting the newest "
+              f"{len(targets)} — every tournament from {first} on —\neach from the "
+              f"{len(pool)} that came before the window and from every held-out "
+              f"tournament\nthat started on an earlier day, the way the app has last "
+              f"week's edition on the night.\nNothing sees the future: not the model, "
+              f"not the baselines. (--frozen: the pool alone.)\n")
+    elif pool is not None and CHRONO:
         first = min(str(t.get("start_time") or "") for t in targets)[:10]
         print(f"{len(comps)} tournaments in the database. Forecasting the newest "
               f"{len(targets)} — every tournament from {first} on —\nfrom the "
@@ -537,7 +594,7 @@ def report() -> None:
               f"{len(targets)} of them,\nwith the curve fitted on a disjoint "
               f"{len(pool)} so no tournament is in its own fit.\n"
               f"Seed {SEED} — the same sample every run.\n")
-    cv = cross_validate(comps)
+    cv = cross_validate(comps, rolling=rolling)
     complaints = data_health(comps)
     note = information_note(comps, targets, pool)
     if note.startswith("WARNING"):
@@ -553,7 +610,7 @@ def report() -> None:
     got = cv.dropna(subset=["value"])
     summary = {
         "generated": date.today().isoformat(),
-        "split": "chronological" if (pool is not None and CHRONO) else "random",
+        "split": "rolling" if rolling else ("chronological" if (pool is not None and CHRONO) else "random"),
         "targets": int(len(targets)),
         "pool": int(len(pool)) if pool is not None else int(len(comps)),
         "from": (min(str(t.get("start_time") or "") for t in targets)[:10]
@@ -564,10 +621,27 @@ def report() -> None:
         "coverage": round(float(got["covered"].mean()), 3),
         "nominal": NOMINAL,
     }
+    # How wide the interval has to be for a given share of the thresholds to
+    # land inside it. The forecast quotes one band; this measures, on the
+    # held-out cups, the quantiles of the error in units of that band, so the
+    # page can draw a 50 % and a 90 % interval that are the widths they claim
+    # rather than the widths a normal assumption would give. In log space, and
+    # asymmetric, because the errors are: a threshold can double, not halve.
+    inside = got.dropna(subset=["rel", "truth"])
+    inside = inside[(inside["rel"] > 0) & (inside["value"] > 0) & (inside["truth"] > 0)]
+    if len(inside) >= 200:
+        u = np.log(inside["truth"] / inside["value"]) / inside["rel"]
+        summary["bands"] = {str(int(100 * p)): [round(float(u.quantile((1 - p) / 2)), 3),
+                                                round(float(u.quantile((1 + p) / 2)), 3)]
+                            for p in (0.5, 0.8, 0.9)}
+        summary["band_n"] = int(len(u))
     print(f"Leave-one-tournament-out — {len(got)} of {len(cv)} thresholds predicted, "
           f"over {got['competition_id'].nunique()} tournaments")
     if len(got) < len(cv):
-        print(cv[cv["value"].isna()]["reason"].value_counts().to_string())
+        # The refusals, by their first words: the last places of a closed
+        # lobby are one line, not one line per lobby size.
+        print(cv[cv["value"].isna()]["reason"].astype(str).str.replace(
+            r"^Rank \d+ of \d+ ", "Rank n of m ", regex=True).str[:80].value_counts().to_string())
     print(f"overall: median APE {got['ape'].median():.1f} %   mean {got['ape'].mean():.1f} %   "
           f"band coverage {100 * got['covered'].mean():.0f} % (claimed {100 * NOMINAL:.0f} %)\n")
 
@@ -605,7 +679,8 @@ def report() -> None:
         print("edition to anchor on, so REFERENCE_SHARE was never reached.")
     print()
 
-    with_base = add_baselines(cv, comps, history=pool if pool is not None else comps)
+    with_base = add_baselines(cv, comps, history=comps if rolling else (pool if pool is not None else comps),
+                              rolling=rolling)
     sub = with_base.dropna(subset=["ape_model", "ape_carry", "ape_median"])
     print(f"Against the baselines — {len(sub)} rows over {sub['competition_id'].nunique()} "
           f"tournaments where all three produce a number")
@@ -711,4 +786,6 @@ def report() -> None:
 
 
 if __name__ == "__main__":
-    report()
+    if "--random" in sys.argv:
+        CHRONO = False                  # the old leave-one-out, for comparison
+    report(rolling=False if "--frozen" in sys.argv else None)

@@ -8,6 +8,8 @@ command the day-to-day needs:
                         or all of them once when the naming rules have changed
     pull_live           the live feed's readings of the cups it watched, filed
                         against those tournaments by Epic's ids
+    analysis.live       the pace tables the live forecast reads, replayed from
+                        the boards - when the last ones are PACE_MAX_AGE_DAYS old
     export_model        write model.json, refused unless it reproduces the model
     calendar_snapshot   what is on this week, for the predictor's opening list
     build               index.html + model.js + calendar.js, and standalone.html
@@ -43,7 +45,12 @@ a key at the end, the whole run appended to `data/refresh.log`.
 
 Once a week is the floor, whatever else is skipped: the calendar the site ships
 covers seven days, and it is what the live feed reads to know which cups are
-under way. A calendar older than that and the feed follows nothing.
+under way. A calendar older than that and the feed follows nothing - and a cup
+Epic announces between two runs is a cup the feed never followed. The
+predictor repository's own workflow (.github/workflows/calendar.yml) refreshes
+the calendar every three hours from GitHub for that reason, and this run takes
+its commits in before writing anything, so the two never disagree on a file
+both of them write.
 """
 from __future__ import annotations
 
@@ -80,6 +87,50 @@ def run(label: str, *command: str, cwd: Path | None = None, dry: bool = False) -
         print(f"\n  {label.split('.')[-1].strip()} failed (exit {result.returncode}). "
               f"Stopping here: nothing after this step ran.")
     return result.returncode == 0
+
+
+# The files a run writes from scratch: when GitHub's workflow wrote them too
+# since the last pull, this run's copy is the newer one and wins the rebase.
+GENERATED = {"calendar.js", "index.html", "standalone.html", "model.js", "model.json"}
+
+
+def settle_generated(repo: Path) -> bool:
+    """Finish a rebase that stopped on the generated files alone, keeping
+    this run's copy of each; False when anything else is in conflict."""
+    listed = subprocess.run(["git", "diff", "--name-only", "--diff-filter=U"], cwd=str(repo),
+                            capture_output=True, text=True)
+    conflicted = [line.strip() for line in listed.stdout.splitlines() if line.strip()]
+    if not conflicted or any(name not in GENERATED for name in conflicted):
+        return False
+    # In a rebase "theirs" is the commit being replayed: this folder's own.
+    for name in conflicted:
+        if subprocess.run(["git", "checkout", "--theirs", "--", name], cwd=str(repo),
+                          capture_output=True).returncode:
+            return False
+        subprocess.run(["git", "add", "--", name], cwd=str(repo), capture_output=True)
+    done = subprocess.run(["git", "-c", "core.editor=true", "rebase", "--continue"], cwd=str(repo),
+                          capture_output=True, text=True)
+    return done.returncode == 0
+
+
+# How old the pace tables may get before a run replays them. Three days: the
+# feed's evenings of a cup's week reach its own pace row before its next week.
+PACE_MAX_AGE_DAYS = 3
+PACE_PATH = ROOT / "analysis" / "pace.json"
+
+
+def pace_stale() -> bool:
+    """Are the pace tables missing, or older than PACE_MAX_AGE_DAYS?"""
+    if not (ROOT / "analysis" / "live.py").exists():
+        return False
+    if not PACE_PATH.exists():
+        return True
+    try:
+        generated = json.loads(PACE_PATH.read_text(encoding="utf-8")).get("generated") or ""
+        age = (date.today() - date.fromisoformat(str(generated)[:10])).days
+    except (OSError, ValueError):
+        return True
+    return age >= PACE_MAX_AGE_DAYS
 
 
 def untrack_ignored(repo: Path, dry: bool = False) -> None:
@@ -122,6 +173,8 @@ def main() -> int:
                         help="commit and push the predictor repository afterwards")
     parser.add_argument("--page", action="store_true",
                         help="the page and the calendar alone: no harvest, no model, no feed")
+    parser.add_argument("--pace", action="store_true",
+                        help="replay the pace tables now, whatever their age")
     parser.add_argument("--dry-run", action="store_true",
                         help="print the commands and run none of them")
     args = parser.parse_args()
@@ -145,6 +198,15 @@ def main() -> int:
     if args.page and args.fetch:
         print("--page rebuilds the page alone; --fetch is a harvest pass. Pick one.")
         return 1
+    # What GitHub wrote since the last run - the workflow's calendar refreshes
+    # - comes in first, before this run rewrites the same files on top of it.
+    # A pull that fails (no network, a conflict) is not a reason to stop: the
+    # publish step pulls again, and settles the generated files by itself.
+    if args.publish and (predictor / ".git").exists():
+        if not run(label("Take in what GitHub wrote since the last run"),
+                   "git", "pull", "--rebase", "--quiet", cwd=predictor, dry=args.dry_run):
+            subprocess.run(["git", "rebase", "--abort"], cwd=str(predictor), capture_output=True)
+            print("  (could not pull now - the publish step tries again)")
     if args.page:
         # Everything the page is built from is already on disk - the model of
         # the last full run, the sources, the settings files - except the
@@ -171,6 +233,14 @@ def main() -> int:
         if not run(label("The live feed's readings, into the database"),
                    py, str(HERE / "pull_live.py"), dry=args.dry_run):
             print("  (the feed could not be pulled — its readings keep for a month, next run)")
+        # The pace tables: every board replayed game by game, minutes of
+        # work, so every few days rather than every run - the feed's evenings
+        # of the week join the cups' own paces then. A failed replay is not a
+        # reason to stop: the export carries the tables of the last one.
+        if args.pace or pace_stale():
+            if not run(label("The pace tables, replayed from the boards (a few minutes)"),
+                       py, "-m", "analysis.live", cwd=ROOT, dry=args.dry_run):
+                print("  (the pace tables could not be replayed — the export keeps the last ones)")
         if not run(label("Export the model (refused unless it reproduces the Python model)"),
                    py, str(HERE / "export_model.py"), dry=args.dry_run):
             return 1
@@ -214,6 +284,10 @@ def main() -> int:
                     print("  (nothing changed since the last publish)")
                     continue
                 if command[1] == "pull":
+                    if settle_generated(predictor):
+                        print("  (the workflow had refreshed the calendar meanwhile: this run's "
+                              "copy of the generated files kept, the rest taken in)")
+                        continue
                     subprocess.run(["git", "rebase", "--abort"], cwd=str(predictor),
                                    capture_output=True)
                     print("\n  GitHub has changes this folder could not take in by itself.")

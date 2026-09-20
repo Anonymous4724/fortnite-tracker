@@ -19,6 +19,12 @@ has not built yet - the leaderboard is downloaded once the window is over,
 usually the next day - waits in `data/live_pending.json` and is filed on a
 later run. A reading already filed (same tournament, same minute) is not
 filed twice.
+
+The board the feed read once the cup had settled - twenty minutes past the
+close, see SETTLED_MINUTES - is also filed as the final at the ranks the
+harvest holds no threshold for. The feed follows a cup down to its cuts; the
+harvest's first pass stops at the third page, and until this the model read
+a cut's rank off whichever older edition happened to hold it.
 """
 from __future__ import annotations
 
@@ -38,6 +44,14 @@ PENDING = ROOT / "data" / "live_pending.json"
 CANDIDATES = ["../threshold-ladder", "../predictor"]      # beside this folder
 DAYS = 3
 AGENT = "fortnite-comp-tracker/8.0 (+https://github.com/Anonymous4724)"
+
+# A board settles in the minutes after its window closes, while the games
+# under way at the buzzer come in. A reading taken this long past the close
+# is the board as it will stay - analysis/live.py reads the feed's evenings
+# by the same rule - and where the harvest never read that deep, it is the
+# final the model gets: the feed follows a cup to its cuts, the first harvest
+# pass stops at the third page, and the deeper passes take days.
+SETTLED_MINUTES = 20
 
 
 def feed_from_site() -> str:
@@ -113,6 +127,33 @@ def gather(feed: str, days: int) -> dict:
     return windows
 
 
+def settled_points(window: dict) -> dict[int, float]:
+    """The board once it stopped moving: per rank, the richest reading taken
+    SETTLED_MINUTES or more past the close. Empty while the cup runs."""
+    try:
+        end = datetime.fromisoformat(str(window.get("end") or "").replace("Z", "+00:00"))
+    except ValueError:
+        return {}
+    settled = end + timedelta(minutes=SETTLED_MINUTES)
+    out: dict[int, float] = {}
+    for when, reading in window.get("readings", {}).items():
+        for r in reading.get("readings") or []:
+            if not isinstance(r, list) or len(r) < 2:
+                continue
+            # A rank read off a page stamped at its own minute is that minute's.
+            stamp = str(r[2])[:16] if len(r) > 2 and r[2] else when[:16]
+            try:
+                at = datetime.strptime(stamp.replace("T", " ")[:16], "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
+                rank, value = int(r[0]), float(r[1])
+            except (TypeError, ValueError):
+                continue
+            if at < settled or rank < 1 or value <= 0:
+                continue
+            if value > out.get(rank, 0):
+                out[rank] = value
+    return out
+
+
 def file_window(conn, window: dict, dry: bool) -> tuple[int, int]:
     """(filed, already there) for one window whose tournament exists."""
     comp = db.find_by_window(conn, window.get("event") or "", window.get("window") or "")
@@ -120,22 +161,49 @@ def file_window(conn, window: dict, dry: bool) -> tuple[int, int]:
         return -1, 0
     seen = {str(s["ts"])[:16] for s in db.get_snapshots(conn, comp["id"])}
     filed = skipped = 0
+    # The settled board stands in for the final at the ranks the harvest did
+    # not read - the cut the cup was played for, above all.
+    settled = settled_points(window)
+    if settled and not dry:
+        added = db.add_finals_missing(conn, comp["id"], settled)
+        if added:
+            print(f"  finals    {window.get('name') or ''} ({window.get('region') or '?'}): "
+                  f"ranks {', '.join(str(r) for r in added)} from the settled board")
     for when, reading in sorted(window["readings"].items()):
-        if when[:16] in seen:
-            skipped += 1
-            continue
-        points = {int(r[0]): float(r[1]) for r in reading.get("readings") or []
-                  if isinstance(r, list) and len(r) == 2 and float(r[1]) > 0}
-        if not points:
-            continue
-        if not dry:
-            # A sealed lobby's reading is the board at the end of its last
-            # finished game, and says when a game was under way at the time.
-            db.add_snapshot(conn, comp["id"], ts=when, points=points,
-                            games=reading.get("games") or None,
-                            note="live feed" + (" · final" if reading.get("final") else "")
-                                 + (" · game under way" if reading.get("partial") else ""))
-        filed += 1
+        # `[rank, points]`, or `[rank, points, stamp]` where the feed read
+        # that rank off a page the API stamped at another minute: the run is
+        # not one board, and each minute is filed as the reading it is.
+        groups: dict[str, dict[int, float]] = {}
+        for r in reading.get("readings") or []:
+            if not isinstance(r, list) or len(r) < 2:
+                continue
+            try:
+                rank, value = int(r[0]), float(r[1])
+            except (TypeError, ValueError):
+                continue
+            if rank < 1 or value <= 0:
+                continue
+            stamp = str(r[2])[:16] if len(r) > 2 and r[2] else when[:16]
+            groups.setdefault(stamp, {})[rank] = value
+        for stamp, points in sorted(groups.items()):
+            if stamp in seen:
+                skipped += 1
+                continue
+            ts = when if stamp == when[:16] else stamp
+            if not dry:
+                # A sealed lobby's reading is the board at the end of its last
+                # finished game, and says when a game was under way at the time.
+                db.add_snapshot(conn, comp["id"], ts=ts, points=points,
+                                games=reading.get("games") or None,
+                                # The board's page count at the reading, and
+                                # the exact count of rosters where the feed
+                                # read the last page too: who had played by then.
+                                pages=reading.get("pages") or None,
+                                ranked=reading.get("ranked") or None,
+                                note="live feed" + (" · final" if reading.get("final") else "")
+                                     + (" · game under way" if reading.get("partial") else ""))
+            seen.add(stamp)
+            filed += 1
     return filed, skipped
 
 

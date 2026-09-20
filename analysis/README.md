@@ -19,6 +19,7 @@ python -m analysis.anchor        # is rank 20 the right rank to anchor on?
 python -m analysis.shape         # is the shape a function of rank, or rank/field?
 python -m analysis.figures       # PNG + SVG into analysis/figures/
 python -m analysis.live          # replay the boards game by game -> pace.json, carried into the model
+python -m analysis.rescore       # a cup nobody has seen: recent boards replayed under its table, against the cold rungs
 ```
 
 The database is opened read-only. `analysis.figures` takes about 35 seconds
@@ -42,16 +43,19 @@ else is a few seconds.
 | `validate.py` | Does it beat carrying last edition forward, or the category median? Leave-one-tournament-out over the whole pipeline, error by rank band, band coverage against the claimed 80 %, and error against the size of the history. |
 | `anchor.py` | Is rank 20 the right rank to read the level off? Dispersion of the pace between editions at each candidate rank, then the leave-one-tournament-out forecast re-run with the anchor moved, and a bootstrap on the margin. Also checks the figures `calibration.py`'s comments assert. |
 | `shape.py` | Is the ladder's shape a function of rank, or of rank divided by the field? The shipped form makes the whole shape's amplitude proportional to `(20/field)**b`, so a database whose field sizes all agree cannot tell the two apart — and one whose fields span two orders of magnitude can. Fits both readings with the same estimator on the same within-tournament gaps, and checks whether the residual still carries the field. |
+| `live.py` | What is a reading worth mid-cup? Rebuilds every harvested board at any moment of its session from each roster's own game times, and measures the share of the final threshold reached — on the wall clock for open queues, on games played for lobbies, per game count where enough lobbies played it — plus how much of a reading at one rank belongs to another. Then the part the harvest cannot see: how far Osirion's *published* board can still be from the final, measured on the feed's own evenings, because that is the board the page reads. Also the pace of each kind of cup — its family, per kind of cup and platform within it and pooled (an FNCS practice and a skin cup of the same format do not queue alike: 45 % against 56 % of the final at mid-session), its own recent editions, replayed from the harvest and, where the feed has followed it, read from the feed, which sees the mid-session board the harvest's first pages miss, each row with the format it was measured in — how far the deep end of a queue runs from the top by depth into the field, and how wide a live answer has to be, the last two on the feed's evenings. Writes `pace.json`. |
 | `figures.py` | The four figures: fitted curve over the observed points, the residual panel, the coverage plot, the learning curve. |
+| `rescore.py` | Is a cup nobody has seen better priced by replaying recent boards under its table than by the scoring rung? Takes the cups since mid-August that the rolling validation had to price off the scoring table or the family, replays each from the boards of its region played before it (`src/rescore.py`), and compares both with the truth by rank band — the replay read straight where the boards reach, continued along the ladder past their depth. |
 
-Above `validate.SAMPLE` tournaments the cross-validation replays a random sample
-rather than the whole database, and fits the curve on a second sample drawn
-disjoint from the first. The disjointness is the point: it means the expensive
-fit can be done once for the run instead of once per held-out tournament, while
-still guaranteeing that no tournament ever appears in the fit used to predict
-it. It also makes the measurement conservative — the app in use fits on
-everything, the backtest fits on 1,500. The seed is fixed, so the sample is the
-same every run and a disagreement is reproducible.
+Above `validate.SAMPLE` tournaments the cross-validation holds out the newest
+600 and forecasts each of them from everything that started on an earlier day —
+the pool before the window plus the held-out tournaments already played, the way
+the app has last week's edition on the night — with the curve fitted once, on
+the pool alone, so no target ever shapes the curve used to predict it.
+`--frozen` forecasts all 600 from the pool alone instead; on the same evenings
+that reads about twice the error, because a weekly cup's fifth week is then
+priced off the season before and every edition of a cup born inside the window
+counts as a cold start. `--random` is the old leave-one-out.
 
 ## What came out of it
 

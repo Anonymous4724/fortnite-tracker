@@ -22,6 +22,7 @@ against the Python model it claims to reproduce. See `verify`.
 from __future__ import annotations
 
 import json
+import os
 import re
 import math
 import random
@@ -40,7 +41,8 @@ HERE = Path(__file__).resolve().parent
 # The code lives in `src/`; the database, the research layer and the export
 # one level up. A flat copy still works.
 ROOT = HERE.parent if HERE.name == "src" else HERE
-DB_PATH = ROOT / "data" / "tracker.db"
+# The same database the app reads, and the same way to point elsewhere.
+DB_PATH = Path(os.environ.get("FNT_DB") or (ROOT / "data" / "tracker.db"))
 OUT_PATH = ROOT / "model.json"
 
 VERSION = "1.0"
@@ -105,10 +107,14 @@ def calibration_of(comps: list[dict]) -> dict:
     """
     broad = calibration.broad_stats(comps)
     return {"curve": broad["curve"],
+            "curves": broad.get("curves") or [],
             "reference_pace": broad["reference_pace"],
             "field_sizes": broad["field_sizes"],
             "shape": broad["shape"],
             "direct": broad.get("direct") or {},
+            "direct_kin": broad.get("direct_kin") or {},
+            "seasons": broad.get("seasons") or [],
+            "season_shifts": broad.get("season_shifts") or {},
             "n_broad": broad["n_curve"]}
 
 
@@ -133,7 +139,9 @@ def messages(calib: dict) -> dict:
             "no_games": for_page(why(max_games=0)),
             "no_reference": for_page(why(scoring={})),
             "unconfirmed_scoring": for_page(why(scoring_known=False)),
-            "no_anchor": for_page(why())}
+            "no_anchor": for_page(why()),
+            # A template: the page fills in the rank and the lobby size.
+            "last_places": for_page(calibration.last_places_reason("{rank}", "{field}"))}
 
 
 def for_page(text: str) -> str:
@@ -188,6 +196,10 @@ def _attach(rows: dict, pace: dict | None = None, fields: dict | None = None,
             # reading chose to use one edition of many.
             row["seen"] = level.get("seen", level.get("n", 0))
             row["level"] = level.get("median")
+            # The season the level was read in: a level read across a turn of
+            # season is moved, see calibration.season_move.
+            if level.get("season") is not None:
+                row["season"] = int(level["season"])
         if share is not None:
             row["share_n"] = shared.get("n", 0)
             row["share"] = shared.get("median")
@@ -219,15 +231,12 @@ def _attach(rows: dict, pace: dict | None = None, fields: dict | None = None,
                 # Bars are numbered into the model's `entry_bars` list rather
                 # than spelt out eighteen thousand times, and the trailing
                 # cells are left off when there is nothing to say.
-                packed = {}
-                for r, v in last.items():
-                    cells = [v["value"], v["n"], v["rel"], v.get("field") or 0, bar_index(v.get("entry") or "")]
-                    if v.get("alt"):
-                        cells.append({str(bar_index(bar)): [a[0], a[1] or 0] for bar, a in v["alt"].items()})
-                    while len(cells) > 3 and cells[-1] in (0, -1, None):
-                        cells.pop()
-                    packed[r] = cells
-                row["direct"] = packed
+                # When this cup was last played in this format: what decides
+                # which other format a cup new to its own reads, see
+                # calibration.direct_kin.
+                row["latest"] = max((v.get("date") or "") for v in last.values())
+                row["direct"] = {r: pack_direct(v, row["latest"], row.get("season"))
+                                 for r, v in last.items()}
         out.append(row)
     return out
 
@@ -246,6 +255,56 @@ def bar_index(bar: str) -> int:
     return ENTRY_BARS.index(bar)
 
 
+def pack_direct(v: dict, latest: str = "", row_season=None) -> list:
+    """One direct row, packed:
+
+        [value, editions, spread, field, entry bar, {other bar: [value, field]},
+         season, date]
+
+    The field and the bar are what the first rung corrects for. Bars are
+    numbered into the model's `entry_bars` list rather than spelt out eighteen
+    thousand times, and the trailing cells are left off when there is nothing
+    to say - but each of them says "nothing" its own way, and the first bar of
+    the list is numbered zero. Trimming trailing zeros blindly cost every row
+    on that bar its bar; the page then read those editions as barless, did not
+    widen where the tournament asked for another bar, and the export check
+    refused the model over the difference.
+
+    The season is the number of the one the edition read was played in, what
+    a reading carried across a turn of season is moved by - written only
+    where it is not the row's own (the season of the edition the level was
+    read off), which a reader falls back on; the date is that edition's,
+    written only where it is not the row's latest - a rank the latest
+    edition did not publish, read off an older one - so the page can say
+    which edition it read.
+    """
+    season = int(v["season"]) if v.get("season") is not None else -1
+    if row_season is not None and season == int(row_season):
+        season = -1
+    # An edition under another bar: [value, field, season, date], its season
+    # written as -1 where it is the row's own, like the season above.
+    alt = {}
+    for bar, a in (v.get("alt") or {}).items():
+        theirs = int(a[3]) if len(a) > 3 and a[3] is not None else -1
+        if row_season is not None and theirs == int(row_season):
+            theirs = -1
+        alt[str(bar_index(bar))] = [a[0], a[1] or 0, theirs, str(a[2]) if len(a) > 2 and a[2] else ""]
+    cells = [v["value"], v["n"], v["rel"], v.get("field") or 0, bar_index(v.get("entry") or ""),
+             alt or 0, season,
+             v.get("date") if v.get("date") and v.get("date") != latest else ""]
+    if not cells[7]:
+        cells.pop()
+        if cells[6] == -1:
+            cells.pop()
+            if not cells[5]:
+                cells.pop()
+                if cells[4] == -1:
+                    cells.pop()
+                    if not cells[3]:
+                        cells.pop()
+    return cells
+
+
 def build_tables(comps: list[dict], calib: dict) -> dict:
     """The three anchor tables, plus the field sizes that go with them.
 
@@ -259,13 +318,19 @@ def build_tables(comps: list[dict], calib: dict) -> dict:
     shape = calib["shape"]
 
     def described(comp):
+        # The format is part of what makes a row: the same cup in Trio and in
+        # Duo is two rows, and the page asks for the one it is looking at.
         return {"category": comp["kind"],
                 "family": (comp.get("family") or "").strip() or comp["kind"],
-                "stage": (comp.get("stage") or "").strip()}
+                "stage": (comp.get("stage") or "").strip(),
+                "team_mode": comp.get("team_mode") or "",
+                "game_mode": comp.get("game_mode") or ""}
 
     categories = _grouped(broad, lambda c: [
-        ((c["kind"], c["region"]), dict(described(c), region=c["region"]))])
-    families = _grouped(broad, lambda c: [(c["kind"], described(c))])
+        ((c["kind"], c["region"], c.get("team_mode") or "", c.get("game_mode") or ""),
+         dict(described(c), region=c["region"]))])
+    families = _grouped(broad, lambda c: [
+        ((c["kind"], c.get("team_mode") or "", c.get("game_mode") or ""), described(c))])
     # Both share keys, `(mode, team)` and `(mode, "")`, are rows here: the second
     # is what a mode borrows from when its own team mode was never measured.
     modes = _grouped(broad, lambda c: [
@@ -296,7 +361,26 @@ def build_tables(comps: list[dict], calib: dict) -> dict:
         # size, team size "" for the mode alone, game mode "*" for everything;
         # each bucket [q, share of max, rel, n].
         "lobby": lobby_rows(pace.get("lobby") or {}),
+        # The ladder: every open queue's thresholds relative to rank 20, pooled
+        # by band of field size and game mode ("" for the band across game
+        # modes); each rank [median, boards, spread]. See calibration.LADDER_MIN.
+        "ladders": ladder_rows(shape.get("ladder") or {}),
     }
+
+
+def ladder_rows(table: dict) -> list[dict]:
+    """The calibration's ladder, keyed by band index, as rows a port reads by
+    field: [lower edge, upper edge (0: none)] and the game mode."""
+    import ast
+    edges = (0,) + tuple(calibration.LADDER_BANDS) + (0,)
+    out = []
+    for key, rows in table.items():
+        band, game_mode = ast.literal_eval(key)
+        out.append({"lo": int(edges[int(band)]), "hi": int(edges[int(band) + 1]),
+                    "game_mode": game_mode or "",
+                    "shape": {r: [v["median"], v["n"], v["rel"]] for r, v in rows.items()}})
+    out.sort(key=lambda r: (r["lo"], r["game_mode"]))
+    return out
 
 
 def lobby_rows(table: dict) -> list[dict]:
@@ -388,7 +472,7 @@ def measured_quality() -> dict | None:
         return None
     keep = ("generated", "split", "targets", "pool", "from", "thresholds", "median_ape",
             "mean_ape", "coverage", "nominal", "cold_median_ape", "cold_share",
-            "lobby_median_ape", "lobby_rows", "baselines")
+            "lobby_median_ape", "lobby_rows", "baselines", "bands", "band_n")
     return {k: found.get(k) for k in keep if k in found}
 
 
@@ -411,7 +495,12 @@ def measured_pace() -> dict | None:
         return None
     if not isinstance(found.get("curve"), dict):
         return None
-    return {k: found.get(k) for k in ("generated", "boards", "curve", "dispersion", "carry")
+    return {k: found.get(k) for k in ("generated", "boards", "curve", "dispersion", "carry",
+                                     "tail", "tail_dispersion", "tail_feed",
+                                     "games_curve", "games_dispersion",
+                                     # The pace by kind of cup, the depth of a rank and the
+                                     # width of a live answer: see analysis/live.py.
+                                     "families", "categories", "depth", "live_bands")
             if k in found}
 
 
@@ -430,6 +519,10 @@ def build_model(conn, comps: list[dict], calib: dict) -> dict:
                     "half again to say so.",
         },
         "curve": {"a": a, "b": b, "reference_rank": calibration.REFERENCE_RANK},
+        # The curve by band of field size: [lower edge, upper edge (0: none),
+        # a, b], read by `curve_for`; the pooled curve above answers for a
+        # field whose band was not fitted. See calibration.FIELD_BANDS.
+        "curves": [list(row) for row in (calib.get("curves") or [])],
         "game_minutes": dict(db.GAME_MINUTES),
         "reference_share": calibration.REFERENCE_SHARE,
         "anchor_spread": dict(calibration.ANCHOR_SPREAD),
@@ -437,16 +530,35 @@ def build_model(conn, comps: list[dict], calib: dict) -> dict:
         "games_exponent": calibration.GAMES_EXPONENT,
         "spread": {"shape": calibration.SHAPE_FALLBACK_REL,
                    "field_entered": 0.15, "field_probe": 0.30},
+        # Which scopes a level anchored on each source reads its shape from,
+        # spelt out per source string so a port looks its source up as it is;
+        # "ladder" is the pooled table by field size in `ladders`, read to any
+        # depth with `ladder_min` boards, the cup's own tables to `max_rank`.
         "shape_rule": {"min_editions": calibration.SHAPE_MIN, "prior_weight": 4,
                        "max_rank": calibration.SHAPE_MAX_RANK,
-                       "scopes": {k: list(v) for k, v
-                                  in calibration.SHAPE_SCOPES.items()}},
+                       "ladder_min": calibration.LADDER_MIN,
+                       "scopes": {source: list(calibration.shape_scopes(source)) for source in
+                                  ("category", "family", "scoring", "scoring (thin sample)",
+                                   "scoring (prior)", "mode")}},
         "widen": {"single_edition": 1.5, "game_mode_only": 1.2,
                   "thin_sample": 1.3, "prior_only": 1.15, "cold_region": 0.9,
                   "entry": calibration.WIDEN_ENTRY},
         "field_move": {"cap": calibration.FIELD_MOVE_CAP, "rel": calibration.FIELD_MOVE_REL},
+        # The re-scored boards' own dispersion, where a calendar row's table
+        # does not carry its own. See calibration.replay_reading, rescore.py.
+        "replay_rel": calibration.REPLAY_REL,
+        # The seasons the history spans ([number, first day seen]), the
+        # current one, and how the level moved at each turn of season per
+        # band of rank: [[from, to, {band: [shift, spread, pairs]}], ...] with
+        # the fallback spread for a turn no cup has crossed yet. See
+        # calibration.season_move.
+        "seasons": [[int(n), str(day)] for n, day in (calib.get("seasons") or [])],
+        "season": max((int(n) for n, _ in (calib.get("seasons") or [])), default=None),
+        "season_shifts": calib.get("season_shifts") or {"boundaries": [], "fallback": dict(calibration.SEASON_SPREAD)},
         "lobby_cap": {"large": dict(calibration.LOBBY_CAP), "small": dict(calibration.LOBBY_CAP_SMALL)},
-        "lobby_rule": {"thin": calibration.LOBBY_THIN, "widen": dict(calibration.LOBBY_WIDEN)},
+        "lobby_rule": {"thin": calibration.LOBBY_THIN, "widen": dict(calibration.LOBBY_WIDEN),
+                       # past this share of the lobby, the last places: no forecast
+                       "last": calibration.LOBBY_LAST},
         "messages": messages(calib),
         "quality": measured_quality(),
         "pace": measured_pace(),
@@ -457,8 +569,8 @@ def build_model(conn, comps: list[dict], calib: dict) -> dict:
     model["entry_bars"] = list(ENTRY_BARS)
     model["scoring_presets"] = scoring_presets(conn)
     model["source"]["dropped"] = trim_to_budget(model)
-    model["categories"].sort(key=lambda r: (r["category"], r["region"]))
-    model["families"].sort(key=lambda r: r["category"])
+    model["categories"].sort(key=lambda r: (r["category"], r["region"], r["team_mode"], r["game_mode"]))
+    model["families"].sort(key=lambda r: (r["category"], r["team_mode"], r["game_mode"]))
     model["modes"].sort(key=lambda r: (r["game_mode"], r["team_mode"]))
     model["mode_fields"].sort(key=lambda r: (r["game_mode"], r["team_mode"], r["region"]))
     model["cold_starts"].sort(key=lambda r: (r["game_mode"], r["team_mode"], r["kind"],
@@ -490,6 +602,55 @@ def row_for(rows: list[dict], **match) -> dict | None:
             index.setdefault(tuple(row.get(name) for name in fields), row)
         _INDEXES[key] = index
     return index.get(tuple(match[name] for name in fields))
+
+
+def category_row(model: dict, t: dict) -> dict | None:
+    """This cup, in this region, in this format."""
+    return row_for(model["categories"], category=t.get("category"), region=t.get("region"),
+                   team_mode=t.get("team_mode") or "", game_mode=t.get("game_mode") or "")
+
+
+def family_row(model: dict, t: dict) -> dict | None:
+    """This cup across regions, in this format."""
+    return row_for(model["families"], category=t.get("category"),
+                   team_mode=t.get("team_mode") or "", game_mode=t.get("game_mode") or "")
+
+
+_KIN: dict[tuple, dict] = {}
+
+
+def kin_rows(model: dict, t: dict) -> list[dict]:
+    """The other formats this cup has run in, in this region: the port of
+    calibration.direct_kin. Newest first, ties broken on the format's names."""
+    key = (id(model["categories"]), len(model["categories"]))
+    index = _KIN.get(key)
+    if index is None:
+        index = {}
+        for row in model["categories"]:
+            if row.get("direct"):
+                index.setdefault((row.get("category"), row.get("region")), []).append(row)
+        for rows in index.values():
+            rows.sort(key=lambda r: (r.get("latest") or "", r.get("team_mode") or "",
+                                     r.get("game_mode") or ""), reverse=True)
+        _KIN[key] = index
+    return [r for r in index.get((t.get("category"), t.get("region")), [])
+            if (r.get("team_mode") or "", r.get("game_mode") or "")
+            != (t.get("team_mode") or "", t.get("game_mode") or "")]
+
+
+def curve_for(model: dict, field: int) -> dict:
+    """The port of calibration.curve_for: the field band's curve, else the pooled one."""
+    pooled = model["curve"]
+    field = int(field or 0)
+    if field > 0:
+        # A band runs from its lower edge up to, not including, its upper
+        # one; the last band has no upper edge (0).
+        for row in model.get("curves") or []:
+            lo, hi = int(row[0]), int(row[1])
+            if field >= lo and (hi == 0 or field < hi):
+                return {"a": float(row[2]), "b": float(row[3]),
+                        "reference_rank": pooled["reference_rank"]}
+    return pooled
 
 
 def field_move(rank: int, field_now: int, field_then: int, curve: dict, cap: float) -> float:
@@ -527,9 +688,8 @@ def max_game_score(scoring: dict) -> float:
 
 def guess_field(model: dict, t: dict) -> tuple[int, str, float] | None:
     candidates = (
-        ("category", row_for(model["categories"], category=t.get("category"),
-                             region=t.get("region"))),
-        ("family", row_for(model["families"], category=t.get("category"))),
+        ("category", category_row(model, t)),
+        ("family", family_row(model, t)),
         ("mode", row_for(model["mode_fields"], game_mode=t.get("game_mode"),
                          team_mode=t.get("team_mode"), region=t.get("region"))),
     )
@@ -545,8 +705,64 @@ def cold_signature(t: dict) -> tuple:
     kind = next((tag for needle, tag in calibration.COLD_KINDS if needle in name), "other")
     platform = "mobile" if "mobile" in name else ("console" if "console" in name else "pc")
     label = str(t.get("category") or "")
-    stage = "final" if label.endswith((" Final", "Semi-final")) else "open"
+    if label.endswith((" Final", "Semi-final")):
+        stage = "final"
+    elif calibration.LATER_ROUND.search(label):
+        stage = "later"
+    else:
+        stage = "open"
     return (t.get("game_mode") or "", t.get("team_mode") or "", kind, platform, stage)
+
+
+def season_band(rank: int) -> str:
+    """The port of calibration.season_band: "100", "500" or "0"."""
+    if rank <= 100:
+        return "100"
+    if rank <= 500:
+        return "500"
+    return "0"
+
+
+def tournament_season(model: dict, t: dict):
+    """The season the tournament is played in: the form's - the page reads it
+    off the calendar row's event id, and hands a typed tournament the model's
+    current one - or, for a form that says nothing, the model's current one.
+    A form that names it and leaves it empty is a tournament of no known
+    season, and is not moved."""
+    if "season" not in t:
+        return model.get("season")
+    season = t.get("season")
+    if season is None or season == "":
+        return None
+    return int(season)
+
+
+def season_move(model: dict, since, until, rank: int) -> tuple[float, float, int]:
+    """The port of calibration.season_move: (shift, spread, pairs) from one
+    season to a later one at this rank, the turns of season between them
+    summed; an unknown turn at the fallback spread and no shift."""
+    if since is None or until is None or int(until) <= int(since):
+        return 0.0, 0.0, 0
+    since, until = int(since), int(until)
+    shifts = model.get("season_shifts") or {}
+    known = [int(entry[0]) for entry in model.get("seasons") or []]
+    band = season_band(rank)
+    steps = [n for n in known if since < n <= until]
+    if until not in known:
+        steps.append(until)
+    table = {(int(b[0]), int(b[1])): b[2] for b in shifts.get("boundaries") or []}
+    fallback = float((shifts.get("fallback") or {}).get(band, 0.12))
+    shift, var, pairs, previous = 0.0, 0.0, 0, since
+    for step in steps:
+        row = (table.get((previous, step)) or {}).get(band)
+        if row:
+            shift += float(row[0])
+            var += float(row[1]) ** 2
+            pairs += int(row[2])
+        else:
+            var += fallback ** 2
+        previous = step
+    return shift, math.sqrt(var), pairs
 
 
 def anchor_level(model: dict, t: dict) -> dict | None:
@@ -554,6 +770,7 @@ def anchor_level(model: dict, t: dict) -> dict | None:
     if games <= 0:
         return None
     spread, widen = model["anchor_spread"], model["widen"]
+    until = tournament_season(model, t)
 
     def measured(source, row):
         if not row or row.get("n", 0) < 1:
@@ -564,12 +781,15 @@ def anchor_level(model: dict, t: dict) -> dict | None:
         theirs = float(row.get("games") or 0) or games
         value = row["level"] * (games / theirs) ** model["games_exponent"]
         once = (row.get("seen") if row.get("seen") is not None else row["n"]) == 1
-        return {"value": value, "source": source, "n": row["n"],
-                "rel": spread[source] * (widen["single_edition"] if once else 1.0)}
+        rel = spread[source] * (widen["single_edition"] if once else 1.0)
+        # A level read across a turn of season moves with the season.
+        shift, moved, _ = season_move(model, row.get("season"), until, model["curve"]["reference_rank"])
+        if moved > 0:
+            value *= math.exp(shift)
+            rel = math.sqrt(rel ** 2 + moved ** 2)
+        return {"value": value, "source": source, "n": row["n"], "rel": rel}
 
-    for source, row in (("category", row_for(model["categories"], category=t.get("category"),
-                                             region=t.get("region"))),
-                        ("family", row_for(model["families"], category=t.get("category")))):
+    for source, row in (("category", category_row(model, t)), ("family", family_row(model, t))):
         found = measured(source, row)
         if found:
             return found
@@ -651,8 +871,16 @@ def between(v_lo: float, v_hi: float, f: float) -> float:
     return math.exp((1 - f) * math.log(v_lo) + f * math.log(v_hi))
 
 
-def shape_from_model(model: dict, t: dict, rank: int, source: str):
-    """(ratio, relative uncertainty) at this rank, read from the exported tables.
+def ladder_rows_for(model: dict, field: int, game_mode) -> list[dict]:
+    """The ladder rows a field of this size reads, the game mode's first."""
+    rows = [r for r in model.get("ladders") or []
+            if field >= int(r["lo"]) and (int(r["hi"]) == 0 or field < int(r["hi"]))]
+    return ([r for r in rows if r["game_mode"] == (game_mode or "")]
+            + [r for r in rows if r["game_mode"] == ""])
+
+
+def shape_from_model(model: dict, t: dict, rank: int, source: str, field: int = 0):
+    """(ratio, relative uncertainty, scope) at this rank, from the exported tables.
 
     The port of `calibration.shape_from`, and it has to stay one: the scope
     order, the minimum edition count and the blending weight are all read from
@@ -661,40 +889,49 @@ def shape_from_model(model: dict, t: dict, rank: int, source: str):
     """
     rule = model.get("shape_rule") or {}
     least, prior = rule.get("min_editions", 3), rule.get("prior_weight", 4)
-    if int(rank) > rule.get("max_rank", 500):
-        return None
-    order = tuple(model.get("shape_rule", {}).get("scopes", {}).get(source, ()))
+    max_rank, ladder_min = rule.get("max_rank", 500), rule.get("ladder_min", 20)
+    order = tuple((rule.get("scopes") or {}).get(source, ()))
+
+    def read(entry):
+        median, n, rel = entry
+        weight = n / (n + prior)
+        return float(median), math.sqrt(weight * rel ** 2
+                                        + (1 - weight) * model["spread"]["shape"] ** 2)
+
+    def off(table, floor):
+        def usable(entry):
+            return bool(entry) and entry[1] >= floor and bool(entry[0])
+        entry = table.get(str(int(rank)))
+        if usable(entry):
+            return read(entry)
+        found = bracket_of(table, rank, usable)
+        if not found:
+            return None
+        lo, hi, f = found
+        (r_lo, b_lo), (r_hi, b_hi) = read(table[str(lo)]), read(table[str(hi)])
+        return between(r_lo, r_hi, f), max(b_lo, b_hi)
+
     for scope in order:
+        if scope == "ladder":
+            if int(field or 0) <= 0:
+                continue
+            for row in ladder_rows_for(model, int(field), t.get("game_mode")):
+                got = off(row.get("shape") or {}, ladder_min)
+                if got:
+                    return got[0], got[1], "ladder"
+            continue
+        if int(rank) > max_rank:
+            continue
         if scope == "category":
-            row = row_for(model["categories"], category=t.get("category"),
-                          region=t.get("region"))
+            row = category_row(model, t)
         elif scope == "family":
-            row = row_for(model["families"], category=t.get("category"))
+            row = family_row(model, t)
         else:
             row = row_for(model["modes"], game_mode=t.get("game_mode"),
                           team_mode=t.get("team_mode"))
-        table = (row or {}).get("shape") or {}
-
-        def usable(entry):
-            return bool(entry) and entry[1] >= least and bool(entry[0])
-
-        def read(entry):
-            median, n, rel = entry
-            weight = n / (n + prior)
-            return float(median), math.sqrt(weight * rel ** 2
-                                            + (1 - weight) * model["spread"]["shape"] ** 2)
-
-        entry = table.get(str(int(rank)))
-        if usable(entry):
-            median, blended = read(entry)
-        else:
-            found = bracket_of(table, rank, usable)
-            if not found:
-                continue
-            lo, hi, f = found
-            (r_lo, b_lo), (r_hi, b_hi) = read(table[str(lo)]), read(table[str(hi)])
-            median, blended = between(r_lo, r_hi, f), max(b_lo, b_hi)
-        return float(median), blended
+        got = off((row or {}).get("shape") or {}, least)
+        if got:
+            return got[0], got[1], scope
     return None
 
 
@@ -774,16 +1011,19 @@ def predict_from_model(model: dict, tournament: dict) -> dict | None:
         return None
 
     # Rung zero, the port of calibration.direct_from: this cup, this region,
-    # this rank, last time.
-    row = row_for(model["categories"], category=tournament.get("category"),
-                  region=tournament.get("region"))
+    # this format, this rank, last time.
+    row = category_row(model, tournament)
     table = (row or {}).get("direct") or {}
+    curve = curve_for(model, field)
 
     want = str(tournament.get("entry") or "")
     # A count, or nothing: the page's fields are typed or read off a cut, so
     # always counts; a stored tournament's is a count unless the harvest hit
     # the API's ceiling, which as_input says.
     field_now = int(tournament.get("field_size") or 0) if tournament.get("field_counted", True) else 0
+    until = tournament_season(model, tournament)
+    latest = str((row or {}).get("latest") or "")
+    row_season = (row or {}).get("season")
 
     def direct_read(entry):
         value, n, measured = float(entry[0]), int(entry[1]), entry[2]
@@ -799,42 +1039,85 @@ def predict_from_model(model: dict, tournament: dict) -> dict | None:
         theirs = bars[int(entry[4])] if len(entry) > 4 and isinstance(entry[4], int) and entry[4] >= 0 else ""
         alt = entry[5] if len(entry) > 5 and isinstance(entry[5], dict) else {}
         note = None
+        # The season and date of the edition actually read: the latest, or
+        # the last one under the bar asked for; the row's own season and its
+        # latest date where a cell says nothing.
+        since = entry[6] if len(entry) > 6 and isinstance(entry[6], int) and entry[6] >= 0 else row_season
+        date = entry[7] if len(entry) > 7 and entry[7] else latest
         if want and theirs and want != theirs:
             other = alt.get(str(bars.index(want))) if want in bars else None
-            if other:
+            # Read only when played in the same season as the latest edition.
+            other_season = (other[2] if len(other) > 2 and isinstance(other[2], int) and other[2] >= 0
+                            else row_season) if other else None
+            if other and (other_season is None or since is None or int(other_season) == int(since)):
                 value, edition_field = float(other[0]), int(other[1] or 0)
+                since = other_season
+                if len(other) > 3 and other[3]:
+                    date = other[3]
                 note = ("same_entry",)
             else:
                 rel *= model["widen"]["entry"]
                 note = ("other_entry", theirs)
         effect = 0.0
         if field_now > 0 and edition_field > 0 and edition_field != field_now:
-            move = field_move(rank, field_now, edition_field, model["curve"], model["field_move"]["cap"])
+            move = field_move(rank, field_now, edition_field, curve, model["field_move"]["cap"])
             value *= math.exp(move)
             rel = math.sqrt(rel ** 2 + (model["field_move"]["rel"] * move) ** 2)
             effect = 100 * (math.exp(move) - 1)
-        return value, rel, n, note, effect
+        # Read across a turn of season, the value moves.
+        shift, moved, pairs = season_move(model, since, until, rank)
+        season = {"effect": 0.0, "pairs": 0, "since": None, "until": None, "date": date}
+        if moved > 0:
+            value *= math.exp(shift)
+            rel = math.sqrt(rel ** 2 + moved ** 2)
+            season = {"effect": 100 * (math.exp(shift) - 1), "pairs": pairs,
+                      "since": int(since), "until": int(until), "date": date}
+        return value, rel, n, note, effect, season
 
-    direct = None
-    entry = table.get(str(rank))
-    if entry and entry[0]:
-        value, rel, n, note, effect = direct_read(entry)
-        direct = (value, rel, n, note, effect)
-    else:
+    def from_table(table):
+        entry = table.get(str(rank))
+        if entry and entry[0]:
+            value, rel, n, note, effect, season = direct_read(entry)
+            return (value, rel, n, note, effect, season)
         found = bracket_of(table, rank, lambda e: bool(e) and bool(e[0]))
-        if found:
-            lo, hi, f = found
-            (v_lo, rel_lo, n_lo, note, e_lo), (v_hi, rel_hi, n_hi, _, e_hi) = direct_read(table[str(lo)]), direct_read(table[str(hi)])
-            direct = (between(v_lo, v_hi, f), max(rel_lo, rel_hi), min(n_lo, n_hi), note, (1 - f) * e_lo + f * e_hi)
+        if not found:
+            return None
+        lo, hi, f = found
+        (v_lo, rel_lo, n_lo, note, e_lo, s_lo), (v_hi, rel_hi, n_hi, _, e_hi, s_hi) = \
+            direct_read(table[str(lo)]), direct_read(table[str(hi)])
+        return (between(v_lo, v_hi, f), max(rel_lo, rel_hi), min(n_lo, n_hi), note, (1 - f) * e_lo + f * e_hi,
+                dict(s_lo, effect=(1 - f) * s_lo["effect"] + f * s_hi["effect"]))
+
+    direct = from_table(table)
+    # A cup that has never run in this format reads its last edition in
+    # another one, band widened - unless it is a single lobby, which the
+    # closed-lobby rung below prices better than a lobby of another size.
+    if not direct and not table and not single_lobby(model, tournament, field):
+        for other in kin_rows(model, tournament):
+            latest, row_season = str(other.get("latest") or ""), other.get("season")
+            direct = from_table(other.get("direct") or {})
+            if direct:
+                value, rel, n, note, effect, season = direct
+                direct = (value, rel * model["widen"]["entry"], n,
+                          ("other_format", other.get("team_mode") or "", other.get("game_mode") or ""),
+                          effect, season)
+                break
     if direct:
-        value, rel, n, note, effect = direct
+        value, rel, n, note, effect, season = direct
         return {"ok": True, "shape_source": "direct", "value": round(value, 1),
                 "low": round(max(0.0, value * (1 - rel)), 1),
                 "high": round(value * (1 + rel), 1), "n": n, "source": "previous edition",
                 "games": int(tournament.get("max_games") or 0), "field": field,
                 "share": round(100 * rank / field, 2), "guessed_field": guessed,
                 "field_effect": round(effect, 1), "entry_note": note,
+                "edition": season["date"], "season_effect": round(season["effect"], 1),
+                "season_pairs": season["pairs"], "season_from": season["since"], "season_to": season["until"],
                 "level": round(value, 1), "ref_rank": rank}
+
+    # The last places of a single lobby: teams that left, not a threshold.
+    if single_lobby(model, tournament, field) and rank / field > model["lobby_rule"]["last"]:
+        return {"ok": False, "reason": model["messages"]["last_places"]
+                .replace("{rank}", str(int(rank))).replace("{field}", str(int(field)))}
 
     top = anchor_level(model, tournament)
 
@@ -852,21 +1135,39 @@ def predict_from_model(model: dict, tournament: dict) -> dict | None:
                     "share": round(100 * rank / field, 2), "guessed_field": guessed,
                     "field_effect": 0.0, "level": round(value, 1), "ref_rank": rank}
 
+    # The port of calibration.replay_reading: the cup nobody has seen in this
+    # region, recent boards replayed under its table (the calendar's `cold`).
+    replay = None if single_lobby(model, tournament, field) else replay_reading(model, tournament, rank, field)
+    if replay and (not top or top["source"] not in ("category", "family")):
+        value, rel = replay["value"], replay["rel"]
+        slope = field_sensitivity(rank, field, curve)
+        return {"ok": True, "shape_source": replay["shape_source"], "value": round(value, 1),
+                "low": round(max(0.0, value * (1 - rel)), 1),
+                "high": round(value * (1 + rel), 1), "n": replay["n"], "source": "re-scored boards",
+                "games": int(tournament.get("max_games") or 0), "field": field,
+                "share": round(100 * rank / field, 2), "guessed_field": guessed,
+                "field_effect": round(100 * slope * model["spread"]["field_probe"], 1) if rank > replay["deep"] else 0.0,
+                "level": round(value, 1), "ref_rank": rank, "replay_deep": replay["deep"]}
+
     if not top:
         return {"ok": False, "reason": why_no_anchor(model, tournament)}
 
-    curve = model["curve"]
     slope = field_sensitivity(rank, field, curve)
-    found = shape_from_model(model, tournament, rank, top["source"])
+    found = shape_from_model(model, tournament, rank, top["source"], field)
     if found:
-        ratio, shape_rel = found
-        shape_source, field_part = "measured", 0.0
+        ratio, shape_rel, scope = found
+        shape_source, field_part = ("ladder" if scope == "ladder" else "measured"), 0.0
     else:
         ratio, shape_rel = shape_ratio(rank, field, curve), model["spread"]["shape"]
         shape_source = "curve"
         field_part = slope * (field_spread if guessed else model["spread"]["field_entered"])
     value = top["value"] * ratio
     rel = math.sqrt(top["rel"] ** 2 + shape_rel ** 2 + field_part ** 2)
+    source, replay_deep = top["source"], None
+    if replay and source == "family":
+        value = math.sqrt(value * replay["value"])
+        rel = math.sqrt(rel ** 2 + replay["rel"] ** 2) / 2
+        source, replay_deep = "family + re-scored boards", replay["deep"]
     return {
         "ok": True,
         "shape_source": shape_source,
@@ -874,7 +1175,7 @@ def predict_from_model(model: dict, tournament: dict) -> dict | None:
         "low": round(max(0.0, value * (1 - rel)), 1),
         "high": round(value * (1 + rel), 1),
         "n": top["n"],
-        "source": top["source"],
+        "source": source,
         "games": int(tournament.get("max_games") or 0),
         "field": field,
         "share": round(100 * rank / field, 2),
@@ -882,7 +1183,50 @@ def predict_from_model(model: dict, tournament: dict) -> dict | None:
         "field_effect": round(100 * slope * model["spread"]["field_probe"], 1),
         "level": round(top["value"], 1),
         "ref_rank": curve["reference_rank"],
+        "replay_deep": replay_deep,
     }
+
+
+def replay_reading(model: dict, t: dict, rank: int, field: int) -> dict | None:
+    """The port of calibration.replay_reading, off the form's `cold` table."""
+    cold = t.get("cold")
+    if not isinstance(cold, dict) or not cold.get("ranks"):
+        return None
+    if cold.get("sig") and cold["sig"] != calibration.table_signature(t.get("scoring"), t.get("max_games")):
+        return None
+    table = {}
+    for pair in cold["ranks"]:
+        try:
+            at, value = int(pair[0]), float(pair[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if at >= 1 and value > 0:
+            table[at] = value
+    if not table:
+        return None
+    rel = float(cold.get("rel") or model.get("replay_rel") or 0.12)
+    donors = int(cold.get("donors") or 0)
+    deepest = max(table)
+    rank = int(rank)
+    if rank in table:
+        return {"value": table[rank], "rel": rel, "n": donors, "shape_source": "replay", "deep": deepest}
+    if rank < deepest:
+        found = bracket_of({str(k): v for k, v in table.items()}, rank, lambda v: bool(v))
+        if not found:
+            return None
+        lo, hi, f = found
+        return {"value": between(table[lo], table[hi], f), "rel": rel, "n": donors,
+                "shape_source": "replay", "deep": deepest}
+    here = shape_from_model(model, t, rank, "scoring", field)
+    there = shape_from_model(model, t, deepest, "scoring", field)
+    if here and there:
+        ratio, shape_rel, shape_source = here[0] / there[0], math.sqrt(here[1] ** 2 + there[1] ** 2), "ladder"
+    else:
+        curve = curve_for(model, field)
+        ratio = shape_ratio(rank, field, curve) / shape_ratio(deepest, field, curve)
+        shape_rel, shape_source = model["spread"]["shape"], "curve"
+    return {"value": table[deepest] * ratio, "rel": math.sqrt(rel ** 2 + shape_rel ** 2),
+            "n": donors, "shape_source": shape_source, "deep": deepest}
 
 
 def gave_up(model: dict, want: dict, t: dict) -> bool:
@@ -894,11 +1238,9 @@ def gave_up(model: dict, want: dict, t: dict) -> bool:
     worth counting — it is the price of the budget, in forecasts.
     """
     for source in (want.get("source"), want.get("guessed_field")):
-        if source == "category" and not row_for(model["categories"],
-                                                category=t.get("category"),
-                                                region=t.get("region")):
+        if source == "category" and not category_row(model, t):
             return True
-        if source == "family" and not row_for(model["families"], category=t.get("category")):
+        if source == "family" and not family_row(model, t):
             return True
     return False
 
@@ -910,6 +1252,11 @@ def as_input(comp: dict) -> dict:
             "max_games": comp.get("max_games"), "field_size": comp.get("field_size"),
             "entry": comp.get("entry") or "",
             "field_counted": calibration.counted_field(comp) > 0 or not int(comp.get("field_size") or 0),
+            # The season, as the model dates the tournament into it: the
+            # page reads it off the calendar row's event id instead.
+            "season": comp.get("_season"),
+            # The re-scored table, when the calendar wrote one beside the row.
+            "cold": comp.get("cold"),
             "scoring": comp.get("scoring"), "scoring_known": comp.get("scoring_known")}
 
 
@@ -924,15 +1271,34 @@ def variants(comp: dict):
     unseen = dict(comp, family=NONE, stage="")
     unseen["kind"] = db.category_of(unseen)
     nowhere = dict(unseen, region=NONE, game_mode=NONE)
+    # The same cup a season on: the previous edition read across a turn of
+    # season, and the level with it.
+    later = (comp.get("_season") or 0) + 1
+    # A re-scored table like the calendar's, made of this cup's own finals
+    # bent a little, to the depth a three-page board is trusted to: what the
+    # replay rung reads, alone and averaged with the family's reading, and
+    # one replayed under another table, which must not be read.
+    finals = {int(r): float(v) for r, v in (comp.get("finals") or {}).items() if float(v) > 0}
+    cold = {"ranks": [[r, round(v * 0.97, 1)] for r, v in sorted(finals.items()) if r <= 100],
+            "donors": 4, "deep": max([r for r in finals if r <= 100], default=0), "rel": 0.12,
+            "sig": calibration.table_signature(comp.get("scoring"), comp.get("max_games"))}
+    stale = dict(cold, sig=cold["sig"] + "|edited")
     return [
         ("category", comp),
+        ("category, next season", dict(comp, season=f"S{later}", _season=later)),
         # The same cup under another entry bar than its last edition's, and
         # with a field typed in that is not the edition's: the first rung's
         # two corrections.
         ("category, other entry bar", dict(comp, entry="ranked-br-combined:21")),
         ("category, field typed", dict(comp, field_size=max(1, int((comp.get("field_size") or 0) * 1.5)) or 300)),
+        # The same cup in a team size it has never run in: the first rung's
+        # other-format fallback, or the closed-lobby rung when it is one lobby.
+        ("category, other format", dict(comp, team_mode="Trio" if comp.get("team_mode") != "Trio" else "Duo")),
         ("family", dict(comp, region=NONE)),
         ("scoring", unseen),
+        ("re-scored boards", dict(unseen, cold=cold)),
+        ("family + re-scored boards", dict(comp, region=NONE, cold=cold)),
+        ("re-scored under another table", dict(unseen, cold=stale)),
         ("scoring prior", dict(unseen, game_mode=NONE)),
         ("scoring, team mode unmeasured", dict(unseen, team_mode=NONE)),
         # A final in one lobby the model has never seen: twenty teams, or the
@@ -966,6 +1332,7 @@ def verify(model: dict, comps: list[dict], calib: dict) -> dict:
         # Seeded, so a disagreement found today can be reproduced tomorrow.
         checked = random.Random(20260903).sample(comps, VERIFY_SAMPLE)
     for comp in checked:
+        comp["_season"] = calibration.season_of(comp, calib.get("seasons"))
         every = sorted(set(ranks) | set(comp.get("ranks") or []) | set(comp.get("finals") or {}))
         for branch, variant in variants(comp):
             for rank in every:
@@ -990,7 +1357,9 @@ def verify(model: dict, comps: list[dict], calib: dict) -> dict:
                 agreed = bool(got and got.get("ok")) and all(
                     want.get(key) == got.get(key) for key in
                     ("value", "low", "high", "n", "source", "field", "level",
-                     "share", "guessed_field", "field_effect", "entry_note"))
+                     "share", "guessed_field", "field_effect", "entry_note",
+                     "edition", "season_effect", "season_pairs", "season_from", "season_to",
+                     "shape_source", "replay_deep"))
                 if agreed:
                     diffs.append(0.0)
                 elif gave_up(model, want, form):
@@ -1081,6 +1450,14 @@ def main() -> int:
     conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     comps = load_competitions(conn)
+    # `--before 2026-09-05`: the model as it would have been exported that
+    # morning, for replaying evenings that came after it without letting them
+    # read their own result. `--out path`: where to write it, so a backtest
+    # never touches the model the site ships.
+    before = argument("--before")
+    if before:
+        comps = [c for c in comps if str(c.get("start_time") or "")[:10] < before]
+        print(f"as of {before}: {len(comps)} tournaments started before that day")
     complaint = field_complaint(comps)
     if complaint and "--allow-flat-fields" not in sys.argv:
         print(f"\nNOT EXPORTED\n\n{complaint}\n", file=sys.stderr)
@@ -1147,10 +1524,20 @@ def main() -> int:
               "no export.", file=sys.stderr)
         return 1
 
-    report_drift(model["curve"])
-    OUT_PATH.write_text(payload, encoding="utf-8")
-    print(f"\nWrote {OUT_PATH} — {len(payload.encode('utf-8')):,} bytes")
+    out = Path(argument("--out") or OUT_PATH)
+    if out == OUT_PATH:
+        report_drift(model["curve"])
+    out.write_text(payload, encoding="utf-8")
+    print(f"\nWrote {out} — {len(payload.encode('utf-8')):,} bytes")
     return 0
+
+
+def argument(flag: str) -> str | None:
+    """The value after `flag` on the command line, or None."""
+    if flag in sys.argv:
+        i = sys.argv.index(flag)
+        return sys.argv[i + 1] if i + 1 < len(sys.argv) else None
+    return None
 
 
 if __name__ == "__main__":
