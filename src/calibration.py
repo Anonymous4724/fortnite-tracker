@@ -615,6 +615,64 @@ def counted_field(comp: dict) -> int:
     return field
 
 
+# The previous edition, smoothed. A cup's latest edition is one evening, and
+# at the top of the board one evening is one team's great night: read straight
+# it carries that night into next week's forecast. The editions before it,
+# when they were played the same way - same number of games, same scoring
+# table, same entry bar, same season - say the same thing with more nights
+# behind it. So the reading is an exponentially weighted average of that run,
+# in log terms, the latest edition weighing DIRECT_ALPHA and each one before
+# it that share of what is left; a run of one is the latest edition, as
+# before. Measured on the cups played since June with three editions or more
+# in their run, against the latest edition read straight: 2.83 -> 2.65 %
+# median error at ranks 1-25, 1.45 -> 1.28 at 26-100, 2.19 -> 2.10 at
+# 101-500, 4.96 -> 4.47 deeper. A trend - the last move carried forward, even
+# damped - lost everywhere (2.83 -> 3.25 at the top): cups do not drift, they
+# wobble. At most DIRECT_RUN editions are read.
+# Through the rolling validation (each tournament forecast from what had
+# finished before its day), the 1,711 thresholds of 193 cups the smoothing
+# changes: median error unchanged (2.84 %), mean 6.98 -> 6.44 % (95 % interval
+# of the gain, resampling cups: 0.22 to 0.87 points), 90th percentile 13.9 ->
+# 13.2 %. The weight is the one that keeps the median: 0.8 gains less in the
+# tail (6.58 %), 0.6 and 0.5 start to cost it (2.95 %, 3.09 %).
+DIRECT_ALPHA = 0.7
+DIRECT_RUN = 6
+
+
+def format_of(comp: dict) -> str:
+    """How an edition was played, as far as its thresholds are concerned: the
+    number of games and the scoring table. Two editions that differ here are
+    two ladders, whatever their name."""
+    scoring = comp.get("scoring") or {}
+    if isinstance(scoring, str):
+        try:
+            scoring = json.loads(scoring)
+        except ValueError:
+            scoring = {}
+    return f"{int(comp.get('max_games') or 0)}|{table_signature(scoring, 0)}"
+
+
+def smoothed_run(dated: list[tuple]) -> tuple[float, int]:
+    """(value, editions read) for one rank: the latest edition, averaged with
+    the ones just before it played the same way - see DIRECT_ALPHA.
+
+    `dated` is sorted oldest first; each item is (date, value, entry, field,
+    season, format). The run stops at the first edition, going back, that
+    was played under another entry bar, format or season.
+    """
+    latest = dated[-1]
+    run = [latest]
+    for item in reversed(dated[:-1]):
+        if len(run) >= DIRECT_RUN or (item[2], item[4], item[5]) != (latest[2], latest[4], latest[5]):
+            break
+        run.append(item)
+    run.reverse()
+    level = math.log(run[0][1])
+    for item in run[1:]:
+        level = DIRECT_ALPHA * math.log(item[1]) + (1 - DIRECT_ALPHA) * level
+    return math.exp(level), len(run)
+
+
 def direct_tables(history: list[dict], seasons: list | None = None) -> dict:
     """What the previous edition of each cup scored at each rank, read straight.
 
@@ -642,11 +700,12 @@ def direct_tables(history: list[dict], seasons: list | None = None) -> dict:
         entry = str(comp.get("entry") or "")
         field = counted_field(comp)
         season = season_of(comp, seasons)
+        fmt = format_of(comp)
         for rank in comp.get("ranks") or ():
             value = predict.final_value(comp, int(rank))
             if value and value > 0:
                 by_name.setdefault(name, {}).setdefault(int(rank), []).append(
-                    (str(comp.get("start_time") or ""), value, entry, field, season))
+                    (str(comp.get("start_time") or ""), value, entry, field, season, fmt))
     out: dict = {}
     for name, ranks in by_name.items():
         table = {}
@@ -659,15 +718,18 @@ def direct_tables(history: list[dict], seasons: list | None = None) -> dict:
             # The edition read is dated and placed in its season: a rank the
             # latest edition did not publish is read off an older one, and
             # the model has to know when that one was played to carry it
-            # across a turn of season - see `season_move`.
-            row = {"value": round(values[-1], 2), "n": len(values),
+            # across a turn of season - see `season_move`. The value is the
+            # latest edition's, smoothed with the ones before it that were
+            # played the same way - see `smoothed_run`.
+            value, run = smoothed_run(dated)
+            row = {"value": round(value, 2), "n": len(values),
                    "rel": round(max(rel, SHAPE_FLOOR), 4) if rel is not None else None,
                    "field": latest[3] or 0, "entry": latest[2], "date": latest[0][:10],
-                   "season": latest[4]}
+                   "season": latest[4], "run": run}
             # The last edition under each other entry bar: what to read when
             # the cup coming up asks for that bar rather than the latest one.
             alt = {}
-            for date, value, entry, field, season in dated:
+            for date, value, entry, field, season, _ in dated:
                 if entry and entry != latest[2]:
                     alt[entry] = [round(value, 2), field or 0, date[:10], season]
             if alt:

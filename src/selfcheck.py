@@ -91,7 +91,7 @@ check("cleanup.py --list offers only caches and interrupted downloads",
       all(o.endswith(("__pycache__", ".part")) for o in offered), str(offered))
 
 print("\n5. the research layer")
-for mod in ("data", "fit", "diagnostics", "validate", "anchor", "shape"):
+for mod in ("data", "fit", "diagnostics", "validate", "anchor", "shape", "blend"):
     code, out = run(f'"{PY}" -m analysis.{mod}', timeout=900, cwd=ROOT)
     check(f"analysis.{mod}", code == 0, out.strip()[-120:] if code else "")
 
@@ -113,7 +113,30 @@ for folder, names in (("", os.listdir(SRC)), ("templates/", os.listdir(os.path.j
                 leaks.append(f"{path}:{n}")
 check("comments are English", not leaks, str(leaks[:5]))
 
-print("\n7. nothing private, nothing secret")
+print("\n7. the week's list, priced as the page prices it")
+# The predictor beside this folder, with its model and its calendar: every row
+# the page can open by itself gets a forecast from the export's port of it.
+# (The port is checked against the page itself row by row where a browser is
+# at hand; here, that it runs and answers.)
+import json as _json
+import calendar_snapshot as _cal
+_pred = _cal.predictor_dir()
+if _pred and os.path.exists(os.path.join(_pred, "calendar.js")) and os.path.exists(os.path.join(_pred, "model.json")):
+    _payload = _cal.previous_calendar(os.path.join(_pred, "calendar.js")) or {}
+    for _row in _payload.get("events") or []:
+        _row.pop("fc", None)
+    try:
+        _priced = _cal.forecast_cells(_payload, os.path.join(_pred, "model.json"))
+        _openable = sum(1 for r in _payload.get("events") or []
+                        if r.get("team") and r.get("mode") not in (None, "", "Other") and r.get("scoring") is not None)
+        check("the week's cups are priced", _openable == 0 or _priced >= _openable // 2,
+              f"({_priced} of {_openable} rows the page opens by itself)")
+    except Exception as exc:                                         # noqa: BLE001
+        check("the week's cups are priced", False, str(exc)[:120])
+else:
+    print("  (no predictor folder with a model and a calendar beside this one: skipped)")
+
+print("\n8. nothing private, nothing secret")
 # The account's own name, read from the machine rather than written here.
 _me = re.escape(os.path.basename(os.path.expanduser("~")) or "\x00")
 private = re.compile(_me + r"|C:\\\\Users|@gmail\.", re.I)

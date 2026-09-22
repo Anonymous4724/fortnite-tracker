@@ -20,13 +20,14 @@ Four launchers at the root are the whole day-to-day; everything else is in `src/
 
 **Measured as a forecast — each of the newest 600 tournaments predicted from everything
 that had finished before its day, nothing seeing the future: 2.8 % median error where the cup
-has run before, 5.6 % over every threshold, 91 % of real thresholds inside the quoted range.**
+has run before, 5.2 % over every threshold, 94 % of real thresholds inside the quoted range.**
 Where the cup has never run in its region, recent boards of its format are replayed under
 its own scoring table and the error is 4 to 5 % at ranks 1–250, about 6 % to rank 1,000,
 against 8 to 11 % for the scoring-table rung it replaces (102 cups since 15 August, each read from
-boards played before it). The training set is 7,329
-tournaments and 86,825 thresholds read from Osirion's public API (8 September 2026; the
-figures are re-measured by `python -m analysis.validate` and travel with the model).
+boards played before it). The training set is 7,632
+tournaments and 94,286 thresholds read from Osirion's public API (22 September 2026; the
+figures are re-measured every three days by the refresh, `python -m analysis.validate`, and
+travel with the model).
 [`docs/methodology.md`](docs/methodology.md) says how that was measured and where the model
 stops being believable.
 
@@ -62,7 +63,12 @@ A cascade, most direct reading first. Each rung answers only when the one above 
    and it cannot be known before the season's first cups have run. Each rank of the table
    carries the season and date of the edition it was read off, because the latest edition
    is read as deep as it was harvested and a rank past that comes from an older one; the
-   page says which. See `docs/methodology.md`, "The first edition of a season".
+   page says which. See `docs/methodology.md`, "The first edition of a season". And since 22
+   September the edition is smoothed: the run of editions played the same way as the latest
+   — same entry bar, season, number of games and scoring table — averaged in log terms with
+   the latest weighing 0.7 and each one before it 0.7 of what is left, six at most. The
+   median error does not move and the tail shrinks: on the 1,711 thresholds it changes in
+   the rolling validation, mean 6.98 → 6.44 %, 90th percentile 13.9 → 13.2 %.
 2. **Level times measured shape.** The cup's threshold at rank 20 from its previous edition,
    times what that rank was worth relative to rank 20 across the cup's editions — a lookup
    table, not a curve, because the table halved the error where it applies. Category first,
@@ -118,15 +124,17 @@ Two things the data settled on the way:
   cup's own shape table stops at rank 500 and the pooled ladder, keyed on the field, takes
   over.
 - **The level is one edition old, not a median.** Read from the previous edition, the level
-  forecasts at 5.4 %; the median of the last three, 5.7 %; of the last eight, 6.4 %. Cups
-  drift week to week, and history older than the last edition is evidence about last month.
+  forecasts at 5.4 %; the median of the last three, 5.7 %; of the last eight, 6.4 %. History
+  older than the last edition counts only while it was played the same way, and then only
+  with the latest edition weighing most — the smoothing of rung 1, which keeps the median
+  and trims the tail; a trend carried forward lost everywhere: cups wobble, they do not drift.
 
 ---
 
 ## Results
 
-A rolling forecast, not a random split: the newest 600 tournaments — everything from 31 July
-2026 on — each predicted from the 6,729 before the window and from every held-out tournament
+A rolling forecast, not a random split: the newest 600 tournaments — everything from 17 August
+2026 on — each predicted from the 7,032 before the window and from every held-out tournament
 that started on an earlier day, which is what the app has on the night. Nothing sees the
 future, not the model and not the baselines. Forecast cold, before any reading of the live
 standings. (The split used to freeze the pool at the first held-out day, so a weekly cup's
@@ -134,42 +142,44 @@ fifth week was priced off the season before and every edition of a cup born insi
 window counted as a cold start; on the same evenings and the same code that read 12.9 %
 against 6.8 % — a number about the split. `--frozen` still prints it.)
 
-**Where the cup has run before** (2,772 thresholds over 333 tournaments, the rows where the
-model and both baselines answer):
+**Where the cup has run before** (3,469 thresholds over 369 tournaments, the rows where the
+model and both baselines answer; 22 September 2026):
 
 | rank band | this model | previous edition | category median | n |
 |---|---:|---:|---:|---:|
-| 1 – 5 | 4.2 % | 4.5 % | 4.4 % | 952 |
-| 6 – 25 | 2.1 % | 2.1 % | 2.1 % | 802 |
-| 26 – 100 | 1.8 % | 2.0 % | 2.2 % | 357 |
-| 101 – 500 | 2.0 % | 2.5 % | 3.1 % | 472 |
-| beyond 500 | 3.8 % | 5.1 % | 8.7 % | 189 |
-| **all** | **2.5 %** | **2.8 %** | **3.1 %** | **2,772** |
+| 1 – 5 | 4.3 % | 4.2 % | 4.8 % | 1,148 |
+| 6 – 25 | 2.1 % | 2.3 % | 3.7 % | 975 |
+| 26 – 100 | 2.2 % | 2.4 % | 6.1 % | 496 |
+| 101 – 500 | 2.6 % | 3.1 % | 8.6 % | 648 |
+| beyond 500 | 5.6 % | 9.2 % | 12.0 % | 202 |
+| **all** | **2.8 %** | **3.1 %** | **5.6 %** | **3,469** |
 
 The model starts from the previous edition — that is rung 1 — and beats the carry-forward it
-is built on by 0.27 points, the whole interval above zero (+0.11 to +0.47), and the category
-median by 0.57. The lead is the field: a known number of teams that is not the edition's
+is built on by 0.28 points, the whole interval above zero (+0.05 to +0.53), and the category
+median by 2.8; the top five ranks are the one band where last week read straight is as good. The lead is the field: a known number of teams that is not the edition's
 moves the value along the curve's quantile term. What carry-forward still cannot do it also
 does — a band, an answer for ranks last week did not publish, and an answer for cups that
 have no last week.
 
-**Where the cup has never run** (1,775 thresholds over 169 tournaments — a third of the
-sample, the first day of every new cup in every region): 14 % median error from the scoring
-table alone, 90 % inside the band. This is still the rung to improve next.
+**Where the cup has never run** (1,950 thresholds over 159 tournaments, the first day of
+every new cup in every region): 10.7 % median error from the scoring table alone, 96 % inside
+the band. The validation does not replay boards, so this is the rung the replay above
+replaces on the site, at 4 to 5 %.
 
 **Finals in a single lobby the model had never seen** (166 thresholds over 34 tournaments)
 used to go through that same scoring rung and its open-queue curve: 124 % median error, the
 winner of a twenty-team Reload final priced at 2,900 points where 300 was the most anyone
-could score. Read off the finals of the same format by share of the lobby, they come out at
-7 %, with 83 % of them inside the band; the last places of a lobby are refused rather than
-priced.
+could score. Read off the finals of the same format by share of the lobby, they came out at
+7 % then, and at 13.5 % on the newest 600 (175 thresholds over 29 finals, 79 % inside the
+band); the last places of a lobby are refused rather than priced.
 
-**The band is wide.** 91 % of thresholds land inside a band that claims 80 %; at the 89 %
-nominal level the empirical coverage is 95 %. The page's 50 % and 90 % ranges are measured
+**The band is wide.** 94 % of thresholds land inside a band that claims 80 %; at the 89 %
+nominal level the empirical coverage is 97 %. The page's 50 % and 90 % ranges are measured
 directly, as quantiles of the error in units of that band, so they are the widths they claim.
 
-**The first comparable edition is worth 1.1 points** of median error (4.6 % with none, 3.5 %
-with one); the next five are worth 0.3 between them.
+**The first comparable edition is worth 0.9 points** of median error (6.8 % with none, 6.0 %
+with one, on the tournaments with at least six peers); the next five are worth 0.5 between
+them.
 
 Measured on a random split instead — every tournament held out in turn with the rest as
 history — the nearest edition is often next week's, and next week's result is not available
@@ -224,7 +234,8 @@ python src/import_session.py --list                # which tournaments carry eno
 
 `refresh.py` is the day-to-day command: a shallow harvest pass for new windows — three pages
 each, ten for the last three weeks' windows, which are what the replay of a new cup is made
-of — the derivation, the feed's readings, the pace tables every three days, the export
+of — the derivation, the feed's readings, every three days the pace tables, the validation
+and the weights of a live answer (`analysis.live`, `analysis.validate`, `analysis.blend`), the export
 (refused unless it reproduces the model), this week's calendar with the replay beside each
 new cup, the site build, and a push. Its docstring has the one-line Task Scheduler entry that
 runs it every morning. The calendar is what the live feed reads to know which cups are under
@@ -270,6 +281,7 @@ python -m analysis.anchor        # why the level is read at rank 20
 python -m analysis.shape         # is the shape a curve, a table, a function of the field?
 python -m analysis.figures       # regenerate the figures
 python -m analysis.live          # replay the boards game by game: what a threshold is worth mid-cup
+python -m analysis.blend         # how much a cup's readings weigh against its history, on the feed's evenings
 ```
 
 `analysis/` uses numpy, pandas, scipy and matplotlib. The app does not: nothing under
@@ -341,7 +353,7 @@ In the order the numbers justify:
    thousand teams to 0.15 above the API's ceiling, which is why the curve is now fitted per
    band. Within a band it is a working value rather than a measurement — the bands were
    drawn by hand, and the ceiling band's `q` is a convention.
-4. **The live refinement is measured in one half and not the other.** Every harvested
+4. **The live refinement, measured.** Every harvested
    board carries each team's per-game history, so `analysis/live.py` can rebuild the
    standings at any moment of the session; it finds a threshold at half the games sits at
    half its final value, ±15 % from one cup to the next, and the predictor now scales its own
@@ -351,13 +363,15 @@ In the order the numbers justify:
    answer differs by format: in an open queue the whole board moves together (slope 0.86
    between ranks) so one reading prices every rank; inside a closed lobby the ranks move
    independently (slope 0.00, correlation −0.09) because the same twenty teams share out a
-   fixed pot, so a reading now refines its own rank and leaves the rest alone. What is still
-   unmeasured is the blend of readings and history: it is precision-weighted, which is
-   principled, and unvalidated on held-out cups, which is the next replay to run — the
-   ranges it produces are the part that under-covers, holding 27–40 % of the finals where
-   they claim 50 % and 78–85 % where they claim 90 %, because the multipliers that turn a
-   half-width into a range were measured on cold forecasts and never on live ones. The one
-   piece of that now measured is the end of a cup: the settling read off the games' own end
+   fixed pot, so a reading now refines its own rank and leaves the rest alone. The blend
+   of readings and history is precision-weighted, and since 22 September the two widths are
+   put in the units of each side's typical error, measured every three days on the feed's
+   own evenings (`analysis/blend.py`): replayed through the page on a held-out week, the
+   median error at mid-session went from 3.4 to 3.1 %, the forecast of a cup with a
+   previous edition travelled 12 % over its evening instead of 17 %, and the ranges — now
+   measured on live answers (`pace.live_bands`) — held 46 % and 88 % of the finals where they
+   claim 50 % and 90 %. The 90th percentile late in the session is half a point worse, which
+   is what the next replay should look at. One piece measured apart is the end of a cup: the settling read off the games' own end
    times says the board is final and certain twenty minutes past the buzzer, while the board
    the page actually reads is Osirion's published copy, which lands minutes later and can be
    5 % short of the final. That width is measured on the feed's own evenings instead

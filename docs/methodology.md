@@ -876,6 +876,79 @@ rung, `analysis/live.py` the pace by kind, `analysis/rescore.py` the measurement
 
 ---
 
+## History and readings, weighed again, 22 September 2026
+
+Two changes to how the model weighs what it knows, one before the cup and one during it, and
+two ideas measured and left out.
+
+**The previous edition, smoothed.** The first rung read a cup's latest edition straight, and at
+the top of a board one edition is one team's great night. The editions before it say the same
+thing with more nights behind them when they were played the same way, so the rung now reads an
+exponentially weighted average of the run of editions with the same entry bar, season, number of
+games and scoring table as the latest - in log terms, the latest weighing 0.7 and each one before
+it 0.7 of what is left, six editions at most. A run of one is the latest edition, as before. This
+is not the median of the last few editions that lost to the latest one in the level's early
+days (5.4 % against 5.7 % for three, 6.4 % for eight): the run stops at the first edition played
+another way, and the latest keeps most of the weight. Through the rolling validation of the
+newest 600 tournaments, the smoothing changes 1,711 thresholds of 193 cups: the median error does
+not move (2.84 %), the mean goes from 6.98 to 6.44 % (the gain's 95 % interval, resampling cups,
+0.22 to 0.87 points) and the 90th percentile from 13.9 to 13.2 %. A weight of 0.8 gains less in
+the tail, 0.6 and 0.5 start to cost the median (2.95 and 3.09 %). A trend - the last move
+carried forward, even damped - lost everywhere: cups do not drift, they wobble.
+
+**Readings against history.** During a cup the page weighs its readings against the forecast
+made before it by precision: each weighs the inverse of its width squared. The two widths were
+not in the same units. The history's is the width of a bad week (the 80th percentile of the moves
+between editions) and the readings' the spread of a board around its usual share of the final at
+that minute. On the evenings of 14 to 20 September, between a third and two thirds of the
+session, the forecast of a cup with a previous edition was 2.8 % off in median where the forecast
+made before the cup, left alone, was 2.35 % off: the readings had taken half the answer by
+mid-session and dragged it with every early reading, and it travelled 17 % over its evening.
+
+`analysis/blend.py` now measures, on the evenings the feed followed, each side's typical error
+in units of its own width - the median of |log(forecast / final)| over the band for the history,
+by rung, and the median of |log(reading extrapolated / final)| over the pace's width for the
+readings - and the page scales the history's width by the ratio of the two before weighing them.
+A rung is scaled only when twenty cups or more measure it. The range drawn around the answer keeps
+the widths as they stood: the multipliers that turn a width into a range were measured on those,
+and a range drawn through the scaled width held fewer finals than it claimed. Fitted on the
+evenings to 13 September and replayed through the page on the 14th to the 20th (34,892 answers):
+
+| share of the session elapsed | median error before | after | 90th percentile before | after |
+|---|---:|---:|---:|---:|
+| 0.20 - 0.35 | 4.2 % | 4.0 % | 15.1 % | 16.2 % |
+| 0.35 - 0.50 | 4.0 % | 3.6 % | 11.6 % | 11.4 % |
+| 0.50 - 0.65 | 3.4 % | 3.1 % | 9.7 % | 9.6 % |
+| 0.65 - 0.80 | 3.0 % | 2.9 % | 9.4 % | 9.6 % |
+| 0.80 - 0.90 | 2.4 % | 2.4 % | 9.4 % | 10.0 % |
+| 0.90 - 1.00 | 2.3 % | 2.2 % | 7.9 % | 8.3 % |
+| whole evening | 2.21 % | 2.13 % | 9.8 % | 9.9 % |
+
+The ranges held what they claimed as before (46 % in the inner one, 88 % in the outer), and the
+forecast of a cup with a previous edition travelled 12 % over its evening instead of 17 %, its
+worst moment 4.2 % off instead of 5.2 %. The tail is the price: late in the session a forecast
+from history that was badly off now holds on a little longer. Measured again on the database of
+22 September - 95 more evenings, and a more complete harvest of the ones before - the history of
+a cup with a previous edition typically misses by 0.93 of what the readings do rather than 0.67,
+so the page leans on it less than in the test above; the refresh measures the scales again every
+three days, with the pace tables and the validation.
+
+**Tried and left out.** Trusting the readings more when they disagree with the history by far
+more than both widths allow - the signature of a stale history: on both weeks it made the tail
+worse (between a fifth and a third of the session, 90th percentile 16.4 → 18.3 % with the threshold at two widths),
+because a large disagreement early in a session is more often the readings' noise than the
+history's mistake. And the regions that already played a cup this week: how far a cup moves
+against its previous edition does line up across regions (correlation 0.43 to 0.63 by band of
+rank), but correcting last week's reading by the earlier regions' move lost where it matters
+most - fitted before July and applied after, ranks 1-25 went from 2.11 to 2.53 % median error,
+the other bands gained under a tenth of a point.
+
+`calibration.py` carries the smoothing (`DIRECT_ALPHA`, `DIRECT_RUN`), `analysis/blend.py` the
+scales, `export_model.py` carries them into the model as `blend`, and the page's
+`coldWeightScale` reads them.
+
+---
+
 ## 1. The problem
 
 Fortnite tournaments pay out by rank: the top 500 qualify, the top 1,000 get the

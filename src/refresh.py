@@ -10,9 +10,15 @@ command the day-to-day needs:
                         against those tournaments by Epic's ids
     analysis.live       the pace tables the live forecast reads, replayed from
                         the boards - when the last ones are PACE_MAX_AGE_DAYS old
+    analysis.validate   the error and the ranges the site quotes, re-measured on
+                        the newest tournaments - same age rule
+    analysis.blend      how much a cup's readings weigh against its history,
+                        measured on the feed's evenings - after the two above
     export_model        write model.json, refused unless it reproduces the model
-    calendar_snapshot   what is on this week, for the predictor's opening list
-    build               index.html + model.js + calendar.js, and standalone.html
+    calendar_snapshot   what is on this week, for the predictor's opening list,
+                        each cup priced by the model just exported
+    build               index.html + model.js + calendar.js, standalone.html,
+                        and the site's pages (the week, the guides, the method)
     git (--publish)     commit the predictor and push, so the site updates
 
     python src/refresh.py                 everything above, no push
@@ -91,7 +97,14 @@ def run(label: str, *command: str, cwd: Path | None = None, dry: bool = False) -
 
 # The files a run writes from scratch: when GitHub's workflow wrote them too
 # since the last pull, this run's copy is the newer one and wins the rebase.
-GENERATED = {"calendar.js", "index.html", "standalone.html", "model.js", "model.json"}
+# The site's pages are all built too - every page is an index.html in its
+# own folder - and so are the few files beside them.
+GENERATED = {"calendar.js", "index.html", "standalone.html", "model.js", "model.json",
+             "sitemap.xml", "robots.txt", "404.html", "privacy.html", "site.css", "site.js", "ads.txt"}
+
+
+def is_generated(name: str) -> bool:
+    return name in GENERATED or name.endswith("/index.html")
 
 
 def settle_generated(repo: Path) -> bool:
@@ -100,7 +113,7 @@ def settle_generated(repo: Path) -> bool:
     listed = subprocess.run(["git", "diff", "--name-only", "--diff-filter=U"], cwd=str(repo),
                             capture_output=True, text=True)
     conflicted = [line.strip() for line in listed.stdout.splitlines() if line.strip()]
-    if not conflicted or any(name not in GENERATED for name in conflicted):
+    if not conflicted or not all(is_generated(name) for name in conflicted):
         return False
     # In a rebase "theirs" is the commit being replayed: this folder's own.
     for name in conflicted:
@@ -113,24 +126,35 @@ def settle_generated(repo: Path) -> bool:
     return done.returncode == 0
 
 
-# How old the pace tables may get before a run replays them. Three days: the
-# feed's evenings of a cup's week reach its own pace row before its next week.
+# How old the measured tables may get before a run measures them again.
+# Three days: the feed's evenings of a cup's week reach its own pace row before
+# its next week. The validation and the blend follow the same rule: the error
+# and the ranges the site quotes are the model's, and a model that changed is
+# measured again within three days rather than quoted on last month's numbers.
 PACE_MAX_AGE_DAYS = 3
 PACE_PATH = ROOT / "analysis" / "pace.json"
+VALIDATION_PATH = ROOT / "analysis" / "validation.json"
+BLEND_PATH = ROOT / "analysis" / "blend.json"
 
 
-def pace_stale() -> bool:
-    """Are the pace tables missing, or older than PACE_MAX_AGE_DAYS?"""
-    if not (ROOT / "analysis" / "live.py").exists():
+def stale(path: Path, script: str) -> bool:
+    """Is the table at `path` missing, or older than PACE_MAX_AGE_DAYS? Never
+    for a copy without the analysis script that writes it."""
+    if not (ROOT / "analysis" / script).exists():
         return False
-    if not PACE_PATH.exists():
+    if not path.exists():
         return True
     try:
-        generated = json.loads(PACE_PATH.read_text(encoding="utf-8")).get("generated") or ""
+        generated = json.loads(path.read_text(encoding="utf-8")).get("generated") or ""
         age = (date.today() - date.fromisoformat(str(generated)[:10])).days
     except (OSError, ValueError):
         return True
     return age >= PACE_MAX_AGE_DAYS
+
+
+def pace_stale() -> bool:
+    """Are the pace tables missing, or older than PACE_MAX_AGE_DAYS?"""
+    return stale(PACE_PATH, "live.py")
 
 
 def untrack_ignored(repo: Path, dry: bool = False) -> None:
@@ -174,7 +198,7 @@ def main() -> int:
     parser.add_argument("--page", action="store_true",
                         help="the page and the calendar alone: no harvest, no model, no feed")
     parser.add_argument("--pace", action="store_true",
-                        help="replay the pace tables now, whatever their age")
+                        help="measure the pace tables, the validation and the blend now, whatever their age")
     parser.add_argument("--dry-run", action="store_true",
                         help="print the commands and run none of them")
     args = parser.parse_args()
@@ -241,6 +265,18 @@ def main() -> int:
             if not run(label("The pace tables, replayed from the boards (a few minutes)"),
                        py, "-m", "analysis.live", cwd=ROOT, dry=args.dry_run):
                 print("  (the pace tables could not be replayed — the export keeps the last ones)")
+        # The error and the ranges the page quotes, and the weights of a live
+        # answer, measured again on the same rhythm. Each forecasts the newest
+        # tournaments from what came before them - minutes each. A failure
+        # keeps the last figures, which carry their own date.
+        if args.pace or stale(VALIDATION_PATH, "validate.py"):
+            if not run(label("The error and the ranges, re-measured on the newest tournaments (minutes)"),
+                       py, "-m", "analysis.validate", cwd=ROOT, dry=args.dry_run):
+                print("  (the validation did not finish — the model keeps the last figures)")
+        if args.pace or stale(BLEND_PATH, "blend.py"):
+            if not run(label("The weight of a cup's readings against its history (minutes)"),
+                       py, "-m", "analysis.blend", cwd=ROOT, dry=args.dry_run):
+                print("  (the weights could not be measured — the model keeps the last ones)")
         if not run(label("Export the model (refused unless it reproduces the Python model)"),
                    py, str(HERE / "export_model.py"), dry=args.dry_run):
             return 1

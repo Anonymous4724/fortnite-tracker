@@ -477,6 +477,7 @@ def measured_quality() -> dict | None:
 
 
 PACE_PATH = ROOT / "analysis" / "pace.json"
+BLEND_PATH = ROOT / "analysis" / "blend.json"
 
 
 def measured_pace() -> dict | None:
@@ -502,6 +503,23 @@ def measured_pace() -> dict | None:
                                      # width of a live answer: see analysis/live.py.
                                      "families", "categories", "depth", "live_bands")
             if k in found}
+
+
+def measured_blend() -> dict | None:
+    """How the page weighs a cup's readings against its forecast from history:
+    each side's typical error in units of its own width, measured by
+    analysis/blend.py on the evenings the feed followed. None when never
+    measured; the page then weighs the two widths as they stand."""
+    if not BLEND_PATH.exists():
+        return None
+    try:
+        found = json.loads(BLEND_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    reading = found.get("reading") or {}
+    if not isinstance(found.get("cold"), dict) or not reading.get("scale"):
+        return None
+    return {k: found.get(k) for k in ("generated", "evenings", "reading", "cold") if k in found}
 
 
 def build_model(conn, comps: list[dict], calib: dict) -> dict:
@@ -562,6 +580,7 @@ def build_model(conn, comps: list[dict], calib: dict) -> dict:
         "messages": messages(calib),
         "quality": measured_quality(),
         "pace": measured_pace(),
+        "blend": measured_blend(),
     }
     ENTRY_BARS.clear()
     model.update(build_tables(comps, calib))
@@ -1258,6 +1277,131 @@ def as_input(comp: dict) -> dict:
             # The re-scored table, when the calendar wrote one beside the row.
             "cold": comp.get("cold"),
             "scoring": comp.get("scoring"), "scoring_known": comp.get("scoring_known")}
+
+
+def js_round(x: float) -> int:
+    """JavaScript's Math.round: halves up, where Python's round goes to even."""
+    return int(math.floor(float(x) + 0.5))
+
+
+def season_of_event(event_id) -> int | None:
+    """The season an event id names (`epicgames_S42_...`), as the page reads it."""
+    found = re.search(r"(?:^|_)S(\d+)_", str(event_id or ""), re.I)
+    return int(found.group(1)) if found else None
+
+
+def closed_lobby(model: dict, row: dict) -> tuple[int, bool] | None:
+    """The port of the page's closedLobby: (field, guessed) when the calendar
+    row is a single lobby, else None. A later round's field is the cut of the
+    round before and the calendar carries it; otherwise the field the model's
+    editions of the cup ranked, and a final of a cup it has never seen is a
+    lobby's worth."""
+    cap = lobby_cap(model, row.get("team"), row.get("mode"))
+    field = int(row.get("field") or 0)
+    if field > 0:
+        return (field, False) if cap and field <= cap else None
+    asked = {"category": row.get("kind") or row.get("name"), "region": row.get("region"),
+             "team_mode": row.get("team"), "game_mode": row.get("mode")}
+    known = category_row(model, asked) or family_row(model, asked)
+    if known and known.get("field") and cap and known["field"] <= cap:
+        return js_round(known["field"]), False
+    if cap and int(row.get("stage") or 0) in (8, 9):
+        return cap, True
+    return None
+
+
+def calendar_tournament(model: dict, row: dict, scorings: list) -> dict | None:
+    """The tournament the page builds when a calendar row is clicked - the
+    port of pickFromCalendar and asTournament for a row the page fills in
+    whole. None for a row the page completes from what was on screen before
+    (no team size, a mode it does not name, no scoring table): a forecast
+    here would not be the one the page shows.
+
+    The category is the row's own label: the calendar names a cup the way the
+    model does, so a cup it knows reads its editions and one it does not is
+    priced as new - see fromCalendar in the page."""
+    team, mode = str(row.get("team") or ""), str(row.get("mode") or "")
+    index = row.get("scoring")
+    table = scorings[index] if isinstance(index, int) and 0 <= index < len(scorings) else None
+    games = int(row.get("games") or 0)
+    if not team or not mode or mode == "Other" or not table or not table.get("placement") or games < 1:
+        return None
+    closed = closed_lobby(model, row)
+    field = closed[0] if closed else int(row.get("field") or 0)
+    season = season_of_event(row.get("event"))
+    name = str(row.get("name") or "").strip()
+    return {
+        "category": str(row.get("kind") or "") or name, "name": name,
+        "region": row.get("region"), "team_mode": team, "game_mode": mode,
+        "max_games": games, "field_size": field,
+        "scoring": {"kill": table.get("kill") or 0, "kill_cap": table.get("kill_cap"),
+                    "placement": table["placement"]},
+        "entry": str(row.get("entry") or ""),
+        "cold": row.get("cold") if isinstance(row.get("cold"), dict) else None,
+        "season": model.get("season") if season is None else season,
+        "scoring_known": True,
+        "single_lobby": bool(closed),
+    }
+
+
+def cut_rank(cut: list, field: int) -> int:
+    """The rank a cut stands for: a percentile of the field, or a rank never
+    deeper than the field. The port of the page's cutRank."""
+    if cut[0] == "p":
+        return max(1, math.ceil(float(cut[1]) * field)) if field else 0
+    rank = max(1, js_round(float(cut[1] or 0)))
+    return min(rank, field) if field else rank
+
+
+def default_cut(cuts: list, field: int) -> tuple[list, int] | None:
+    """(cut, rank): the widest qualification cut, else the widest of any kind -
+    the rank the page asks first. The port of defaultCut."""
+    ranked = [(cut, cut_rank(cut, field)) for cut in cuts or []]
+    ranked = [x for x in ranked if x[1] > 0]
+    qualify = [x for x in ranked if x[0][0] in ("q", "p")]
+    pool = qualify or ranked
+    best = None
+    for item in pool:
+        if best is None or item[1] > best[1]:
+            best = item
+    return best
+
+
+def calendar_forecast(model: dict, row: dict, scorings: list) -> dict | None:
+    """What the page would answer for a calendar row, at the ranks a list of
+    the week can show: the cut the cup pays out on, and ranks 100 and 1,000
+    of an open queue where the field reaches past them - the win and the top
+    ten of a final of a hundred or fewer, the win of a single lobby.
+
+    {"cut": rank or 0, "field": field, "lobby": bool, "ranks": [[rank, value,
+    rel, source], ...]} - `rel` the forecast's half-width, which the page turns
+    into its ranges with the model's measured multipliers (`quality.bands`)."""
+    t = calendar_tournament(model, row, scorings)
+    if not t:
+        return None
+    field = int(t["field_size"] or 0)
+    if field <= 0:
+        found = guess_field(model, t)
+        field = js_round(found[0]) if found else 0
+    cut = default_cut(row.get("tiers") or [], field)
+    lobby = bool(t.pop("single_lobby"))
+    wanted = [cut[1]] if cut else []
+    if lobby:
+        wanted.append(1)
+    elif field and field <= 100:
+        wanted += [1, 10]
+    else:
+        wanted += [r for r in (100, 1000) if not field or r < field]
+    out = []
+    for rank in sorted(set(wanted)):
+        got = predict_from_model(model, dict(t, rank=rank))
+        if got and got.get("ok") and got.get("value"):
+            value = float(got["value"])
+            rel = max(0.0, float(got["high"]) / value - 1) if value > 0 else 0.0
+            out.append([rank, round(value, 1), round(rel, 4), got.get("source")])
+    if not out:
+        return None
+    return {"cut": cut[1] if cut else 0, "field": field, "lobby": lobby, "ranks": out}
 
 
 def variants(comp: dict):

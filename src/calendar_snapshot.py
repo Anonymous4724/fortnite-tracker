@@ -39,6 +39,14 @@ the boards on disk, so a run without them (the repository's own workflow,
 which refreshes the calendar between two runs of the machine that has them)
 carries the cells the previous calendar wrote for the rows it still lists.
 
+And every row the page can open by itself gets `fc`: what the page answers
+for it, from the model beside the calendar (`model.json` in the predictor's
+folder) - the cut the cup pays out on and, for an open queue, ranks 100 and
+1,000 - each as [rank, points, half-width, rung]. The site's list of the
+week is built from it, so it shows the numbers the page would show without
+running the page; `export_model.calendar_forecast` is the port, checked
+against the page row by row.
+
     python src/calendar_snapshot.py              the next 7 days, every region
     python src/calendar_snapshot.py --days 14    a longer window
     python src/calendar_snapshot.py --out PATH   somewhere other than the predictor
@@ -396,6 +404,34 @@ def packed(rows: list[dict], days: int) -> dict:
     }
 
 
+def forecast_cells(payload: dict, model_path: str) -> int:
+    """Hang the page's forecast on every row it can open by itself; count them.
+
+    Read off the model the page is built with. No model beside the calendar,
+    or one that does not load, and the rows go without: the page computes its
+    own answers either way, and only the site's list of the week reads these.
+    """
+    try:
+        with open(model_path, encoding="utf-8") as fh:
+            model = json.load(fh)
+        import export_model
+    except (OSError, ValueError, ImportError) as exc:
+        print(f"  (no forecasts in the list: {exc})", file=sys.stderr)
+        return 0
+    scorings = payload.get("scorings") or []
+    priced = 0
+    for row in payload.get("events") or []:
+        try:
+            found = export_model.calendar_forecast(model, row, scorings)
+        except Exception as exc:                                     # noqa: BLE001
+            print(f"  (no forecast for {row.get('name')}: {exc})", file=sys.stderr)
+            found = None
+        if found:
+            row["fc"] = found
+            priced += 1
+    return priced
+
+
 def predictor_dir() -> str | None:
     """The predictor repository, found the way update_predictor.py finds it."""
     parent = os.path.dirname(ROOT)
@@ -441,6 +477,7 @@ def main() -> int:
     replayed = replay_cells(rows, previous_calendar(out) if out else None, want=not args.no_replay)
 
     payload = packed(rows, args.days)
+    priced = forecast_cells(payload, os.path.join(os.path.dirname(out), "model.json") if out else "")
     blob = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     text = f"window.CALENDAR = {blob};\n"
 
@@ -456,6 +493,7 @@ def main() -> int:
     print(f"  {cuts} of {len(rows)} say who qualifies, so the page can ask the right rank")
     print(f"  {replayed} carry a replay table: a cup with no edition in its region, "
           f"priced off recent boards replayed under its scoring")
+    print(f"  {priced} carry the page's forecast, for the site's list of the week")
 
     if args.dry_run:
         for row in payload["events"][:8]:

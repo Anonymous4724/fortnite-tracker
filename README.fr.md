@@ -21,14 +21,14 @@ Quatre lanceurs à la racine font tout le quotidien ; le reste est dans `src/` :
 
 **Mesuré comme une prévision — chacun des 600 tournois les plus récents prédit à partir de
 tout ce qui s'était terminé avant son jour, sans que rien ne voie le futur : 2,8 % d'erreur
-médiane quand la cup a déjà eu lieu, 5,6 % sur l'ensemble des seuils, 91 % des seuils réels
+médiane quand la cup a déjà eu lieu, 5,2 % sur l'ensemble des seuils, 94 % des seuils réels
 dans la fourchette annoncée.** Quand la cup n'a jamais eu lieu dans sa région, des
 classements récents de son format sont rejoués avec son propre barème et l'erreur est de 4 à
 5 % aux rangs 1 à 250, d'environ 6 % jusqu'au rang 1 000, contre 8 à 11 % pour l'échelon du barème qu'ils
 remplacent (102 cups depuis le 15 août, chacune lue sur des classements joués avant elle). Le
-jeu d'entraînement compte 7 329 tournois et 86 825 seuils lus sur l'API publique
-d'Osirion (8 septembre 2026 ; `python -m analysis.validate` remesure ces chiffres et ils
-voyagent avec le modèle). [`docs/methodology.md`](docs/methodology.md) explique comment c'est
+jeu d'entraînement compte 7 632 tournois et 94 286 seuils lus sur l'API publique
+d'Osirion (22 septembre 2026 ; la mise à jour remesure ces chiffres tous les trois jours,
+`python -m analysis.validate`, et ils voyagent avec le modèle). [`docs/methodology.md`](docs/methodology.md) explique comment c'est
 mesuré et où le modèle cesse d'être crédible.
 
 ![Courbe ajustée sur les seuils observés](analysis/figures/curve.png)
@@ -68,7 +68,12 @@ dessus ne le peut pas.
    jouées. Chaque rang de la table porte la saison et la date de l'édition sur laquelle il a
    été lu, parce que la dernière édition est lue aussi profond qu'elle a été moissonnée et
    qu'un rang au-delà vient d'une plus ancienne ; la page dit laquelle. Voir
-   `docs/methodology.md`, « The first edition of a season ».
+   `docs/methodology.md`, « The first edition of a season ». Et depuis le 22 septembre,
+   l'édition est lissée : la suite d'éditions jouées comme la dernière — même condition
+   d'accès, même saison, même nombre de parties, même barème — moyennée en logarithme, la
+   dernière pesant 0,7 et chacune des précédentes 0,7 de ce qui reste, six au plus. L'erreur
+   médiane ne bouge pas et la queue se resserre : sur les 1 711 seuils qu'il change dans la
+   validation glissante, moyenne 6,98 → 6,44 %, 90e centile 13,9 → 13,2 %.
 2. **Le niveau fois la forme mesurée.** Le seuil de la cup au rang 20 lors de l'édition
    précédente, fois ce que ce rang valait par rapport au rang 20 sur les éditions de la cup —
    une table, pas une courbe, parce que la table a divisé l'erreur par deux là où elle
@@ -129,16 +134,18 @@ Deux choses que les données ont tranchées en chemin :
   forme propre à une cup s'arrête au rang 500 et laisse la place à l'échelle commune, qui
   est rangée par taille de plateau.
 - **Le niveau a une édition d'âge, pas une médiane.** Lu sur l'édition précédente, il prédit à
-  5,4 % ; la médiane des trois dernières, à 5,7 % ; des huit dernières, à 6,4 %. Les cups
-  dérivent d'une semaine à l'autre, et un historique plus vieux que la dernière édition
-  renseigne sur le mois dernier.
+  5,4 % ; la médiane des trois dernières, à 5,7 % ; des huit dernières, à 6,4 %. Un historique
+  plus vieux que la dernière édition ne compte que s'il a été joué de la même façon, et alors
+  seulement avec la dernière édition qui pèse le plus — le lissage de l'échelon 1, qui garde
+  la médiane et resserre la queue ; une tendance prolongée a perdu partout : les cups
+  oscillent, elles ne dérivent pas.
 
 ---
 
 ## Résultats
 
 Une prévision glissante, pas une coupe aléatoire : les 600 tournois les plus récents — tout
-ce qui commence au 31 juillet 2026 — chacun prédit à partir des 6 729 d'avant la fenêtre et
+ce qui commence au 17 août 2026 — chacun prédit à partir des 7 032 d'avant la fenêtre et
 de chaque tournoi retenu qui a commencé un jour plus tôt, ce que l'app a sous la main le soir
 même. Rien ne voit le futur, ni le modèle ni les références. Prédit à froid, avant tout relevé
 du classement en direct. (La coupe figeait auparavant le passé au premier jour retenu : la
@@ -147,45 +154,47 @@ cinquième semaine d'une cup hebdomadaire était chiffrée d'après la saison d'
 et le même code, cela donnait 12,9 % contre 6,8 % — un chiffre sur la coupe, pas sur le
 modèle. `--frozen` l'imprime encore.)
 
-**Quand la cup a déjà eu lieu** (2 772 seuils sur 333 tournois, les lignes où le modèle et
-les deux références répondent) :
+**Quand la cup a déjà eu lieu** (3 469 seuils sur 369 tournois, les lignes où le modèle et
+les deux références répondent ; 22 septembre 2026) :
 
 | tranche de rangs | ce modèle | édition précédente | médiane de catégorie | n |
 |---|---:|---:|---:|---:|
-| 1 – 5 | 4,2 % | 4,5 % | 4,4 % | 952 |
-| 6 – 25 | 2,1 % | 2,1 % | 2,1 % | 802 |
-| 26 – 100 | 1,8 % | 2,0 % | 2,2 % | 357 |
-| 101 – 500 | 2,0 % | 2,5 % | 3,1 % | 472 |
-| au-delà de 500 | 3,8 % | 5,1 % | 8,7 % | 189 |
-| **tout** | **2,5 %** | **2,8 %** | **3,1 %** | **2 772** |
+| 1 – 5 | 4,3 % | 4,2 % | 4,8 % | 1 148 |
+| 6 – 25 | 2,1 % | 2,3 % | 3,7 % | 975 |
+| 26 – 100 | 2,2 % | 2,4 % | 6,1 % | 496 |
+| 101 – 500 | 2,6 % | 3,1 % | 8,6 % | 648 |
+| au-delà de 500 | 5,6 % | 9,2 % | 12,0 % | 202 |
+| **tout** | **2,8 %** | **3,1 %** | **5,6 %** | **3 469** |
 
 Le modèle part de l'édition précédente — c'est l'échelon 1 — et bat le report sur lequel il
-est bâti de 0,27 point, tout l'intervalle au-dessus de zéro (+0,11 à +0,47), et la médiane
-de catégorie de 0,57. L'avance, c'est l'effectif : un nombre d'équipes connu qui n'est pas
+est bâti de 0,28 point, tout l'intervalle au-dessus de zéro (+0,05 à +0,53), et la médiane
+de catégorie de 2,8 ; les cinq premiers rangs sont la seule tranche où la semaine dernière
+lue telle quelle fait aussi bien. L'avance, c'est l'effectif : un nombre d'équipes connu qui n'est pas
 celui de l'édition déplace la valeur le long du terme de quantile de la courbe. Ce que le
 report ne sait toujours pas faire, il le fait aussi — une fourchette, une réponse pour les
 rangs que la semaine dernière n'a pas publiés, et une réponse pour les cups qui n'ont pas de
 semaine dernière.
 
-**Quand la cup n'a jamais eu lieu** (1 775 seuils sur 169 tournois — un tiers de
-l'échantillon, le premier jour de chaque nouvelle cup dans chaque région) : 14 % d'erreur
-médiane depuis le seul barème, 90 % dans la fourchette. C'est toujours l'échelon à améliorer
-en priorité.
+**Quand la cup n'a jamais eu lieu** (1 950 seuils sur 159 tournois, le premier jour de
+chaque nouvelle cup dans chaque région) : 10,7 % d'erreur médiane depuis le seul barème, 96 %
+dans la fourchette. La validation ne rejoue pas de classements : c'est l'échelon que le rejeu
+ci-dessus remplace sur le site, à 4 à 5 %.
 
 **Les finales à lobby unique jamais vues** (166 seuils sur 34 tournois) passaient par ce
 même échelon du barème et sa courbe de file ouverte : 124 % d'erreur médiane, le vainqueur
 d'une finale Reload à vingt équipes chiffré à 2 900 points quand 300 était le maximum
-possible. Lues sur les finales du même format par part du lobby, elles sortent à 7 %, avec
-83 % d'entre elles dans la fourchette ; les dernières places d'un lobby sont refusées plutôt
-que chiffrées.
+possible. Lues sur les finales du même format par part du lobby, elles sortaient alors à
+7 %, et à 13,5 % sur les 600 plus récents (175 seuils sur 29 finales, 79 % dans la
+fourchette) ; les dernières places d'un lobby sont refusées plutôt que chiffrées.
 
-**La fourchette est large.** 91 % des seuils tombent dans une fourchette qui en annonce
-80 % ; au niveau nominal de 89 %, la couverture réelle est de 95 %. Les fourchettes à 50 % et
+**La fourchette est large.** 94 % des seuils tombent dans une fourchette qui en annonce
+80 % ; au niveau nominal de 89 %, la couverture réelle est de 97 %. Les fourchettes à 50 % et
 à 90 % de la page sont mesurées directement, comme quantiles de l'erreur en unités de cette
 fourchette, donc elles ont la largeur qu'elles annoncent.
 
-**La première édition comparable vaut 1,1 point** d'erreur médiane (4,6 % sans aucune, 3,5 %
-avec une) ; les cinq suivantes en valent 0,3 à elles cinq.
+**La première édition comparable vaut 0,9 point** d'erreur médiane (6,8 % sans aucune, 6,0 %
+avec une, sur les tournois qui ont au moins six pairs) ; les cinq suivantes en valent 0,5 à
+elles cinq.
 
 Mesuré sur une coupe aléatoire à la place — chaque tournoi retiré à son tour avec le reste
 en historique — l'édition la plus proche est souvent celle de la semaine *suivante*, et son
@@ -242,8 +251,9 @@ python src/import_session.py --list                # quels tournois portent asse
 
 `refresh.py` est la commande du quotidien : une passe de moisson légère pour les nouvelles
 fenêtres — trois pages chacune, dix pour les fenêtres des trois dernières semaines, dont le
-rejeu d'une nouvelle cup est fait — la dérivation, les relevés du flux, les tables de rythme
-tous les trois jours, l'export (refusé tant qu'il ne reproduit pas le modèle), le calendrier
+rejeu d'une nouvelle cup est fait — la dérivation, les relevés du flux, tous les trois jours
+les tables de rythme, la validation et les poids d'une réponse en direct (`analysis.live`,
+`analysis.validate`, `analysis.blend`), l'export (refusé tant qu'il ne reproduit pas le modèle), le calendrier
 de la semaine avec le rejeu à côté de chaque nouvelle cup, la construction du site, et un
 push. Sa docstring contient la ligne du Planificateur de tâches qui le lance chaque matin. Le
 calendrier est ce que le flux en direct lit pour savoir quelles cups sont en cours, et une cup
@@ -293,6 +303,7 @@ python -m analysis.anchor        # pourquoi le niveau se lit au rang 20
 python -m analysis.shape         # la forme est-elle une courbe, une table, une fonction du terrain ?
 python -m analysis.figures       # régénère les figures
 python -m analysis.live          # rejoue les classements partie par partie : ce que vaut un seuil en cours de cup
+python -m analysis.blend         # le poids des relevés d'une cup face à son historique, sur les soirées du flux
 ```
 
 `analysis/` utilise numpy, pandas, scipy et matplotlib. L'app, non : rien sous `analysis/`
@@ -367,7 +378,7 @@ Dans l'ordre que justifient les chiffres :
    désormais ajustée par tranche. À l'intérieur d'une tranche, c'est une valeur de travail
    plus qu'une mesure — les tranches sont tracées à la main, et le `q` de la tranche du
    plafond est une convention.
-4. **Le raffinement en direct est mesuré pour une moitié et pas l'autre.** Chaque classement
+4. **Le raffinement en direct, mesuré.** Chaque classement
    moissonné porte l'historique partie par partie de chaque équipe, donc `analysis/live.py`
    peut reconstruire le classement à tout instant de la session ; il trouve qu'à la moitié
    des parties un seuil est à la moitié de sa valeur finale, à ±15 % d'une cup à l'autre, et
@@ -378,14 +389,16 @@ Dans l'ordre que justifient les chiffres :
    format : dans une file ouverte tout le classement bouge ensemble (pente 0,86 entre rangs),
    un relevé chiffre donc tous les rangs ; dans un lobby fermé les rangs bougent
    indépendamment (pente 0,00, corrélation −0,09) parce que les mêmes vingt équipes se
-   partagent un pot fixe — un relevé n'affine donc plus que son propre rang. Ce qui reste non
-   mesuré, c'est la combinaison des relevés et de l'historique : pondérée par la précision,
-   ce qui est fondé, et non validée sur des tournois tenus à l'écart, ce qui est le prochain
-   rejeu à lancer — les fourchettes qu'elle produit sont la partie qui couvre trop peu :
-   elles contiennent 27 à 40 % des seuils là où elles en annoncent 50 %, et 78 à 85 % là où
-   elles en annoncent 90 %, parce que les multiplicateurs qui transforment une demi-largeur
-   en fourchette ont été mesurés sur des prédictions à froid et jamais sur des prédictions en
-   direct. Le seul morceau désormais mesuré, c'est la fin de cup : le tassement lu sur les
+   partagent un pot fixe — un relevé n'affine donc plus que son propre rang. La combinaison
+   des relevés et de l'historique est pondérée par la précision, et depuis le 22 septembre
+   les deux largeurs sont ramenées aux unités de l'erreur typique de chaque côté, mesurée
+   tous les trois jours sur les soirées du flux (`analysis/blend.py`) : rejouée dans la page
+   sur une semaine tenue à l'écart, l'erreur médiane à mi-session est passée de 3,4 à 3,1 %,
+   la prévision d'une cup qui a une édition précédente a parcouru 12 % sur sa soirée au lieu
+   de 17 %, et les fourchettes — désormais mesurées sur des réponses en direct
+   (`pace.live_bands`) — ont contenu 46 % et 88 % des finaux là où elles en annoncent 50 et
+   90 %. Le 90e centile en fin de session est un demi-point moins bon : c'est ce que le
+   prochain rejeu doit regarder. Un morceau mesuré à part, c'est la fin de cup : le tassement lu sur les
    heures de partie dit que le tableau est final et certain vingt minutes après le buzzer,
    alors que le tableau que la page lit est la copie publiée par Osirion, qui arrive plus tard
    et peut être 5 % en dessous du final. Cette largeur est donc mesurée sur les soirées du
