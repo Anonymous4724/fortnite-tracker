@@ -73,7 +73,7 @@ dessus ne le peut pas.
    d'accès, même saison, même nombre de parties, même barème — moyennée en logarithme, la
    dernière pesant 0,7 et chacune des précédentes 0,7 de ce qui reste, six au plus. L'erreur
    médiane ne bouge pas et la queue se resserre : sur les 1 711 seuils qu'il change dans la
-   validation glissante, moyenne 6,98 → 6,44 %, 90e centile 13,9 → 13,2 %.
+   validation glissante, moyenne 7,24 → 6,59 %, 90e centile 14,0 → 13,4 %.
 2. **Le niveau fois la forme mesurée.** Le seuil de la cup au rang 20 lors de l'édition
    précédente, fois ce que ce rang valait par rapport au rang 20 sur les éditions de la cup —
    une table, pas une courbe, parce que la table a divisé l'erreur par deux là où elle

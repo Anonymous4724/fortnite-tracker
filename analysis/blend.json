@@ -1,0 +1,21 @@
+{
+  "cold": {
+    "previous edition": [
+      0.1954,
+      1079,
+      117
+    ],
+    "scoring": [
+      0.1792,
+      723,
+      74
+    ]
+  },
+  "evenings": 214,
+  "generated": "2026-09-22",
+  "note": "typical error over the width each side carries, on the evenings the feed followed: the page scales the history's width by cold / reading before blending",
+  "reading": {
+    "rows": 45210,
+    "scale": 0.2117
+  }
+}

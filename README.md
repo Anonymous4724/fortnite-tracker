@@ -68,7 +68,7 @@ A cascade, most direct reading first. Each rung answers only when the one above 
    — same entry bar, season, number of games and scoring table — averaged in log terms with
    the latest weighing 0.7 and each one before it 0.7 of what is left, six at most. The
    median error does not move and the tail shrinks: on the 1,711 thresholds it changes in
-   the rolling validation, mean 6.98 → 6.44 %, 90th percentile 13.9 → 13.2 %.
+   the rolling validation, mean 7.24 → 6.59 %, 90th percentile 14.0 → 13.4 %.
 2. **Level times measured shape.** The cup's threshold at rank 20 from its previous edition,
    times what that rank was worth relative to rank 20 across the cup's editions — a lookup
    table, not a curve, because the table halved the error where it applies. Category first,

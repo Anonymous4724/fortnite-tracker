@@ -631,10 +631,10 @@ def counted_field(comp: dict) -> int:
 # wobble. At most DIRECT_RUN editions are read.
 # Through the rolling validation (each tournament forecast from what had
 # finished before its day), the 1,711 thresholds of 193 cups the smoothing
-# changes: median error unchanged (2.84 %), mean 6.98 -> 6.44 % (95 % interval
-# of the gain, resampling cups: 0.22 to 0.87 points), 90th percentile 13.9 ->
-# 13.2 %. The weight is the one that keeps the median: 0.8 gains less in the
-# tail (6.58 %), 0.6 and 0.5 start to cost it (2.95 %, 3.09 %).
+# changes: median error unchanged (2.84 %), mean 7.24 -> 6.59 % (95 % interval
+# of the gain, resampling cups: 0.33 to 1.02 points), 90th percentile 14.0 ->
+# 13.4 %. The weight is the one that keeps the median: 0.8 gains less on the
+# mean (6.71 %), 0.6 and 0.5 start to cost it (2.96 %, 3.06 %).
 DIRECT_ALPHA = 0.7
 DIRECT_RUN = 6
 

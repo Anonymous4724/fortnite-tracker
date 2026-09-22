@@ -891,9 +891,9 @@ is not the median of the last few editions that lost to the latest one in the le
 days (5.4 % against 5.7 % for three, 6.4 % for eight): the run stops at the first edition played
 another way, and the latest keeps most of the weight. Through the rolling validation of the
 newest 600 tournaments, the smoothing changes 1,711 thresholds of 193 cups: the median error does
-not move (2.84 %), the mean goes from 6.98 to 6.44 % (the gain's 95 % interval, resampling cups,
-0.22 to 0.87 points) and the 90th percentile from 13.9 to 13.2 %. A weight of 0.8 gains less in
-the tail, 0.6 and 0.5 start to cost the median (2.95 and 3.09 %). A trend - the last move
+not move (2.84 %), the mean goes from 7.24 to 6.59 % (the gain's 95 % interval, resampling cups,
+0.33 to 1.02 points) and the 90th percentile from 14.0 to 13.4 %. A weight of 0.8 gains less on
+the mean (6.71 %), 0.6 and 0.5 start to cost the median (2.96 and 3.06 %). A trend - the last move
 carried forward, even damped - lost everywhere: cups do not drift, they wobble.
 
 **Readings against history.** During a cup the page weighs its readings against the forecast
