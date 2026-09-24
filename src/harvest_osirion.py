@@ -250,6 +250,33 @@ def cut_pages(work: dict, total) -> list[int]:
 SETTLE_MINUTES = 30
 
 
+def settles_at(work: dict) -> float | None:
+    """When this window's board stops moving - its end plus SETTLE_MINUTES -
+    as a timestamp, or None when the window states no readable end."""
+    end = str(work.get("end") or "")[:19].replace(" ", "T")
+    if len(end) < 16:
+        return None
+    try:
+        closed = datetime.strptime(end[:16], "%Y-%m-%dT%H:%M").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    return closed.timestamp() + SETTLE_MINUTES * 60
+
+
+def still_running(work: dict) -> bool:
+    """Is this window's board still moving?
+
+    Its pages may be on disk - the fetch reads what it finds - but what they
+    hold is the cup at the minute they were read. Derived into a competition,
+    that board became the cup's result: on 24 September the evening run read
+    an Icon Cup an hour into its session and recorded 213 points at rank 50
+    for a cup that finished on 519, and the model, finding a finished
+    edition, forecast the rest of the evening from it. A running window is
+    left for a run after it has settled."""
+    at = settles_at(work)
+    return at is not None and time.time() < at
+
+
 def too_early(work: dict) -> bool:
     """Was this window read before its cup had finished, and is it over now?
 
@@ -266,15 +293,8 @@ def too_early(work: dict) -> bool:
     of calls a run for an empty board we can predict. Its empty page stays on
     disk until the cup has actually been played.
     """
-    end = str(work.get("end") or "")[:19].replace(" ", "T")
-    if len(end) < 16:
-        return False
-    try:
-        closed = datetime.strptime(end[:16], "%Y-%m-%dT%H:%M").replace(tzinfo=timezone.utc)
-    except ValueError:
-        return False
-    settled = closed.timestamp() + SETTLE_MINUTES * 60
-    if time.time() < settled:
+    settled = settles_at(work)
+    if settled is None or time.time() < settled:
         return False
     try:
         written = os.path.getmtime(page_path(work, 0))
@@ -707,6 +727,20 @@ def pages_on_disk(work: dict) -> int:
     return count
 
 
+def read_again(work: dict) -> bool:
+    """Was the window's first page downloaded again after its last derivation?
+
+    A window read too early (see too_early) is read again from page zero once
+    it has settled - usually as many pages as before, so counting pages does
+    not see that everything in them changed. The first page being newer than
+    the derivation does."""
+    index = raw_path("index", work["event_id"], f"{slug(work['window_id'])}.json.gz")
+    try:
+        return os.path.getmtime(page_path(work, 0)) > os.path.getmtime(index)
+    except OSError:
+        return False
+
+
 def built_pages(work: dict):
     """How many pages the last derivation of this window read, or None when it
     never was derived - or was, by a version that did not note it."""
@@ -739,12 +773,15 @@ def build(work_list: list[dict], pages: int, limit: int | None = None,
     tournaments is a long time to hold a lock and a lot to lose to a Ctrl-C.
     """
     counts = {"written": 0, "updated": 0, "already": 0, "no_pages": 0, "too_few": 0,
-              "scoring_ok": 0, "scoring_guessed": 0, "renamed": 0}
+              "running": 0, "scoring_ok": 0, "scoring_guessed": 0, "renamed": 0}
     todo = work_list[:limit]
-    ready = [w for w in todo if has_pages(w)]
-    print(f"  {len(todo)} windows, {len(ready)} with standings on disk")
+    on_disk = [w for w in todo if has_pages(w)]
+    ready = [w for w in on_disk if not still_running(w)]
+    counts["running"] = len(on_disk) - len(ready)
+    print(f"  {len(todo)} windows, {len(ready)} with standings on disk"
+          + (f", {counts['running']} still running (left for a later run)" if counts["running"] else ""))
     if not ready:
-        counts["no_pages"] = len(todo)
+        counts["no_pages"] = len(todo) - len(on_disk)
         return counts
     canonical = canonical_names(work_list)
 
@@ -758,7 +795,7 @@ def build(work_list: list[dict], pages: int, limit: int | None = None,
                 comp_id = known.get((work["event_id"], work["window_id"]))
                 if comp_id is not None and not rebuild:
                     seen = built_pages(work)
-                    if seen is not None and pages_on_disk(work) <= seen:
+                    if seen is not None and pages_on_disk(work) <= seen and not read_again(work):
                         counts["already"] += 1
                         continue
                 entries = saved_entries(work, pages)
@@ -1029,7 +1066,8 @@ def main() -> int:
         print(f"\n  written {counts['written']}, derived again {counts['updated']}, "
               f"already there {counts['already']}, "
               f"no standings downloaded {counts['no_pages']}, "
-              f"too few thresholds {counts['too_few']}, renamed {counts['renamed']}")
+              f"too few thresholds {counts['too_few']}, still running {counts['running']}, "
+              f"renamed {counts['renamed']}")
         print(f"  scoring verified against the standings {counts['scoring_ok']}, "
               f"unverified {counts['scoring_guessed']}")
         if counts["no_pages"] and not counts["written"]:
