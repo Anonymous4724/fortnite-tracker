@@ -166,6 +166,24 @@ def main() -> int:
     pct = osirion.payout_tiers(PERCENTILE_WINDOW, "epicgames_S37_EarlyAccessCup_EU")
     check("a percentile cut has a share and no rank", [(None, 0.25, "qualify", "Early Access Final")],
           [(t["rank"], t["share"], t["kind"], t["label"]) for t in pct])
+    # The FNCS Solo qualifiers' Round 1: two days, each window's own board
+    # paying nothing by rank, the cut ranked on the two days' total - a
+    # "Deny" token taken back from the top 8,000 on a board both days post to.
+    def day(n):
+        return {"eventWindowId": f"S42_FNCSSoloQualifiers_Qual1Round1Day{n}_EU", "scoreLocations": [
+            {"leaderboardEventWindowId": f"S42_FNCSSoloQualifiers_Qual1Round1Day{n}_EU", "isMain": True,
+             "payoutTables": [{"scoringType": "value", "ranks": [{"threshold": 0, "payouts": [
+                 {"rewardType": "token", "value": "S42_FNCSSolo_DenyQual1Round2_EU", "quantity": 1}]}]}]},
+            {"leaderboardEventWindowId": "epicgames_S42_FNCSSoloQualifiers_EU_1_risk", "isMain": False,
+             "payoutTables": [{"scoringType": "rank", "ranks": [{"threshold": 8000, "payouts": [
+                 {"rewardType": "token", "value": "S42_FNCSSolo_DenyQual1Round2_EU", "quantity": -1}]}]}]}]}
+    solo = {"eventId": "epicgames_S42_FNCSSoloQualifiers_EU", "eventWindows": [day(1), day(2)]}
+    total = osirion.payout_tiers(day(1), solo["eventId"], solo)
+    check("a cut on the round's total is read off the other board, with its sessions",
+          [(8000, "qualify", "FNCSSolo Qual 1 Round 2", True, 2)],
+          [(t["rank"], t["kind"], t["label"], t.get("total"), t.get("sessions")) for t in total])
+    check("a token given to everyone on the session's board is no cut",
+          [], [t for t in osirion.payout_tiers(day(1), solo["eventId"]) if not t.get("total")])
     check("token names read as words", "Qualifier 2 Round 4",
           osirion.humanise_token("S29_FNCS_Major2_Qualifier2Round4_EU",
                                  "epicgames_S29_FNCS_Major2_Qualifier2_EU"))

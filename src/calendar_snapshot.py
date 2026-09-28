@@ -24,6 +24,8 @@ Round 2" is a rank, and a rank is what the model prices. Each row carries them
 as `tiers`, a short list of `[code, number, detail]`:
 
     ["q", 2000, "Event 2 Round 2"]   the top 2,000 qualify, for that window
+    ["q", 8000, "Qual 1 Round 2", 2] the top 8,000 on the total of the round's
+                                     two sessions qualify (FNCS Solo, Round 1)
     ["p", 0.25, "Final"]             the top quarter of the field qualify
     ["c", 50, 25]                    prize money from 50th place, 25 dollars there
     ["i", 500, ""]                   a cosmetic down to 500th
@@ -45,7 +47,13 @@ folder) - the cut the cup pays out on and, for an open queue, ranks 100 and
 1,000 - each as [rank, points, half-width, rung]. The site's list of the
 week is built from it, so it shows the numbers the page would show without
 running the page; `export_model.calendar_forecast` is the port, checked
-against the page row by row.
+against the page row by row. Once a cup has started its `fc` and `cold` are
+the ones it was listed with before: the model soon holds the cup's result, and
+a forecast made from it would be the answer read back.
+
+The list reaches back as well as forward: the day's cups that are over stay,
+greyed on the page, so the morning's qualifiers can still be opened in the
+evening - to see what they were forecast at, and how their evening went.
 
     python src/calendar_snapshot.py              the next 7 days, every region
     python src/calendar_snapshot.py --days 14    a longer window
@@ -77,9 +85,13 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE) if os.path.basename(HERE) == "src" else HERE
 DAYS = 7
 
-# Tournaments already under way are kept for a grace period: somebody opening
-# the predictor mid-session wants the event they are playing, not the next one.
-STARTED_GRACE_HOURS = 6
+# The day's cups stay listed once they are over: somebody who slept through
+# the morning's Asian and Oceanian qualifiers still wants to see what they were
+# forecast at and how they went. A reader's day starts at their own midnight,
+# which is at most twenty-four hours behind any moment; three more cover the
+# hours between two refreshes. The page drops what ended before the reader's
+# midnight.
+LOOKBACK_HOURS = 27
 
 
 def when(text: str):
@@ -130,7 +142,7 @@ def entry(event: dict, window: dict, region: str) -> dict | None:
         "begin": begin.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%MZ"),
         "end": end.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%MZ") if end else "",
         "scoring": osirion.scoring_from_window(window, cumulative=True),
-        "tiers": tier_summary(osirion.payout_tiers(window, event.get("eventId") or "")),
+        "tiers": tier_summary(osirion.payout_tiers(window, event.get("eventId") or "", event)),
         # Who may enter, as Epic's requirement spells it: the model reads the
         # previous edition with the same bar, and the page says what the bar is.
         "entry": osirion.entry_requirement(window),
@@ -170,7 +182,10 @@ def tier_summary(tiers: list[dict]) -> list[list]:
         if tier["kind"] != "qualify":
             continue
         if tier["rank"]:
-            rows.append(["q", int(tier["rank"]), tier["label"]])
+            # A cut ranked on the total of several sessions says how many:
+            # the page prices the session and says what the total comes to.
+            sessions = int(tier.get("sessions") or 0) if tier.get("total") else 0
+            rows.append(["q", int(tier["rank"]), tier["label"]] + ([sessions] if sessions > 1 else []))
         elif tier["share"]:
             rows.append(["p", float(tier["share"]), tier["label"]])
     for kind, code in (("cash", "c"), ("item", "i")):
@@ -271,9 +286,10 @@ def fed_field(fed: dict, token: str) -> int:
 
 
 def collect(days: int = DAYS, regions=None) -> list[dict]:
-    """Every window starting inside the next `days`, one row each."""
+    """Every window starting inside the next `days`, or over within the last
+    LOOKBACK_HOURS, one row each."""
     now = datetime.now(timezone.utc)
-    floor = now - timedelta(hours=STARTED_GRACE_HOURS)
+    floor = now - timedelta(hours=LOOKBACK_HOURS)
     ceiling = now + timedelta(days=days)
     seen, rows = set(), []
     for asked in (regions or osirion.REGIONS):
@@ -295,7 +311,8 @@ def collect(days: int = DAYS, regions=None) -> list[dict]:
                 if key in seen:
                     continue
                 begin = when(window.get("beginTime"))
-                if not begin or not (floor <= begin <= ceiling):
+                last = when(window.get("endTime")) or begin
+                if not begin or begin > ceiling or last < floor:
                     continue
                 row = entry(event, window, region)
                 # Kept out of the list for the same reason they are kept out of
@@ -322,7 +339,9 @@ def replay_cells(rows: list[dict], previous: dict | None, want: bool = True) -> 
     them - the machine running this is not the one that harvests - the cells
     of the previous calendar are kept for the rows still listed, so a refresh
     of the list never takes a reading away. A cell is carried only for the
-    same scoring table and game count, which its signature spells.
+    same scoring table and game count, which its signature spells. A cup that
+    has started keeps the table it had before it started: computed again, it
+    could be replaying the cup's own board.
     """
     kept = {}
     for row in (previous or {}).get("events") or []:
@@ -337,9 +356,12 @@ def replay_cells(rows: list[dict], previous: dict | None, want: bool = True) -> 
         except Exception as exc:                                     # noqa: BLE001
             print(f"  (no replay tables: {exc})", file=sys.stderr)
             conn = None
+    now = datetime.now(timezone.utc)
     for row in rows:
         table = None
-        if conn is not None:
+        if started(row, now) and (row.get("event"), row.get("window")) in kept:
+            pass
+        elif conn is not None:
             try:
                 table = rescore.cold_table(conn, row)
             except Exception as exc:                                 # noqa: BLE001
@@ -379,6 +401,38 @@ def previous_calendar(path: str) -> dict | None:
         return None
 
 
+def started(row: dict, now: datetime) -> bool:
+    """Has this row's window opened?"""
+    begin = when(str(row.get("begin") or ""))
+    return bool(begin) and begin <= now
+
+
+def carried_over(rows: list[dict], previous: dict | None, now: datetime) -> list[dict]:
+    """The previous calendar's cups that have started and are still inside
+    LOOKBACK_HOURS but are no longer in Osirion's list of what is on: a cup
+    over since the morning can drop out of it, and the day's list keeps it.
+    Unpacked - its scoring table read back out of the previous list - so it is
+    packed with the others. A cup still to come that has gone from the list
+    was withdrawn, and goes."""
+    if not previous:
+        return []
+    listed = {(r.get("event"), r.get("window")) for r in rows}
+    tables = previous.get("scorings") or []
+    floor = now - timedelta(hours=LOOKBACK_HOURS)
+    out = []
+    for row in previous.get("events") or []:
+        if (row.get("event"), row.get("window")) in listed or not started(row, now):
+            continue
+        last = when(str(row.get("end") or row.get("begin") or ""))
+        if not last or last < floor:
+            continue
+        copy = dict(row)
+        index = copy.get("scoring")
+        copy["scoring"] = tables[index] if isinstance(index, int) and 0 <= index < len(tables) else None
+        out.append(copy)
+    return out
+
+
 def packed(rows: list[dict], days: int) -> dict:
     """The rows with their scoring tables shared rather than repeated.
 
@@ -404,12 +458,24 @@ def packed(rows: list[dict], days: int) -> dict:
     }
 
 
-def forecast_cells(payload: dict, model_path: str) -> int:
+def frozen_forecasts(previous: dict | None) -> dict:
+    """The forecasts the previous calendar carried, by (event, window)."""
+    return {(r.get("event"), r.get("window")): r["fc"]
+            for r in (previous or {}).get("events") or [] if isinstance(r.get("fc"), dict)}
+
+
+def forecast_cells(payload: dict, model_path: str, frozen: dict | None = None) -> int:
     """Hang the page's forecast on every row it can open by itself; count them.
 
     Read off the model the page is built with. No model beside the calendar,
     or one that does not load, and the rows go without: the page computes its
     own answers either way, and only the site's list of the week reads these.
+
+    A cup that has started keeps the forecast it was listed with before it
+    started (`frozen`, from the previous calendar): once its result is in the
+    model, a forecast made again would read the cup's own answer, and the
+    list would show a forecast that could not miss. One that started before
+    it was ever priced gets one only while the model has not read it.
     """
     try:
         with open(model_path, encoding="utf-8") as fh:
@@ -419,8 +485,24 @@ def forecast_cells(payload: dict, model_path: str) -> int:
         print(f"  (no forecasts in the list: {exc})", file=sys.stderr)
         return 0
     scorings = payload.get("scorings") or []
+    frozen = frozen or {}
+    now = datetime.now(timezone.utc)
     priced = 0
     for row in payload.get("events") or []:
+        if started(row, now):
+            kept = frozen.get((row.get("event"), row.get("window")))
+            if kept:
+                row["fc"] = kept
+                priced += 1
+                continue
+            try:
+                t = export_model.calendar_tournament(model, row, scorings)
+                seen = export_model.category_row(model, t) if t else None
+            except Exception:                                        # noqa: BLE001
+                seen = None
+            if seen and str(seen.get("latest") or "") >= str(row.get("begin") or "")[:10]:
+                row.pop("fc", None)
+                continue
         try:
             found = export_model.calendar_forecast(model, row, scorings)
         except Exception as exc:                                     # noqa: BLE001
@@ -472,12 +554,18 @@ def main() -> int:
             return 1
         out = os.path.join(found, "calendar.js") if found else ""
 
+    previous = previous_calendar(out) if out else None
+    # The day's cups Osirion no longer lists, kept as the last calendar had them.
+    kept = carried_over(rows, previous, datetime.now(timezone.utc))
+    rows = sorted(rows + kept, key=lambda r: (r["begin"], r["region"], r["name"]))
+
     # The replay tables, before the scoring tables are packed away: a cup
     # with no edition in its region, its table replayed on the week's boards.
-    replayed = replay_cells(rows, previous_calendar(out) if out else None, want=not args.no_replay)
+    replayed = replay_cells(rows, previous, want=not args.no_replay)
 
     payload = packed(rows, args.days)
-    priced = forecast_cells(payload, os.path.join(os.path.dirname(out), "model.json") if out else "")
+    priced = forecast_cells(payload, os.path.join(os.path.dirname(out), "model.json") if out else "",
+                            frozen_forecasts(previous))
     blob = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     text = f"window.CALENDAR = {blob};\n"
 
@@ -494,6 +582,8 @@ def main() -> int:
     print(f"  {replayed} carry a replay table: a cup with no edition in its region, "
           f"priced off recent boards replayed under its scoring")
     print(f"  {priced} carry the page's forecast, for the site's list of the week")
+    if kept:
+        print(f"  {len(kept)} of the day's cups kept from the last calendar: over, and no longer listed")
 
     if args.dry_run:
         for row in payload["events"][:8]:

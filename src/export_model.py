@@ -1009,6 +1009,11 @@ def lobby_estimate(model: dict, t: dict, rank: int, field: int) -> dict | None:
     return {"value": share * best * games, "rel": rel * widen, "n": n}
 
 
+FIELD_BELOW_CUT = ("This cup sends more players on than the field its kind of cup usually has, so the field "
+                   "is not known yet and no forecast is made. It comes once the cup's first board has "
+                   "been read.")
+
+
 def predict_from_model(model: dict, tournament: dict) -> dict | None:
     """A rank's threshold before the tournament starts, from the export alone.
 
@@ -1026,6 +1031,14 @@ def predict_from_model(model: dict, tournament: dict) -> dict | None:
         if not found:
             return {"ok": False, "reason": model["messages"]["no_field"]}
         field, guessed, field_spread = found
+        # A qualification cut deeper than the field guessed for the cup says
+        # the guess is wrong, not where the cut is: the first session of the
+        # FNCS Solo qualifiers sends 8,000 players on in Europe, where the
+        # cups of its mode that the guess reads have fields of three
+        # thousand. No forecast is better than one priced on a field of the
+        # wrong size; the session's own board, once read, gives the field.
+        if int(tournament.get("cut_max") or 0) > field:
+            return {"ok": False, "reason": FIELD_BELOW_CUT}
     if rank < 1:
         return None
 
@@ -1338,6 +1351,9 @@ def calendar_tournament(model: dict, row: dict, scorings: list) -> dict | None:
                     "placement": table["placement"]},
         "entry": str(row.get("entry") or ""),
         "cold": row.get("cold") if isinstance(row.get("cold"), dict) else None,
+        # The deepest qualification cut, the port of the page's cutMax.
+        "cut_max": max([int(c[1]) for c in row.get("tiers") or []
+                        if c and c[0] == "q" and isinstance(c[1], (int, float))] or [0]),
         "season": model.get("season") if season is None else season,
         "scoring_known": True,
         "single_lobby": bool(closed),

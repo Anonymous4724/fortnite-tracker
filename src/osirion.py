@@ -384,16 +384,40 @@ def _payout_reading(payout: dict, event_id: str) -> dict | None:
     return {"kind": kind, "label": f"{shown} series points", "amount": amount, "currency": None}
 
 
-def payout_tiers(window: dict, event_id: str = "") -> list[dict]:
+def _opens_round(payout: dict) -> bool:
+    """A token that sends a player on: given, or - Epic's other spelling of the
+    same thing - a "Deny" token taken back from everyone above the cut."""
+    if str(payout.get("rewardType") or "").lower() != "token":
+        return False
+    value = str(payout.get("value") or "")
+    quantity = payout.get("quantity")
+    if not isinstance(quantity, (int, float)) or isinstance(quantity, bool) or not quantity:
+        return False
+    deny = "deny" in value.lower()
+    return (quantity < 0) == deny
+
+
+def payout_tiers(window: dict, event_id: str = "", event: dict | None = None) -> list[dict]:
     """The cuts a player aims at: qualification, prize money, cosmetics.
 
     One tier per threshold, best kind first when a row pays several things.
     `rank` is the position ("top 25"); a percentile tier has no rank, only a
     `share` of the field, because nobody knows the field before the cup is
     played. Score-valued tables are left out: they are not positions.
+
+    A qualification can be ranked on another board than the session's own.
+    The FNCS Solo qualifiers' Round 1 is played on two days and its cut - the
+    top 8,000 in Europe, 4,000 in NA Central, 2,000 elsewhere - is ranked on
+    the total of the two, a board each day's window posts to beside its own,
+    where the cut is a token given or a "Deny" token taken back. Read off the
+    session's board alone, the round had no cut at all, and the page asked
+    the rank it asks by default. Such a cut comes back with `total` set and
+    `sessions`: how many of the event's windows post to that board - the
+    round's days - when the event is given, else 0.
     """
     tiers: dict = {}
-    for table in score_location(window).get("payoutTables") or []:
+    main = score_location(window)
+    for table in main.get("payoutTables") or []:
         if not isinstance(table, dict):
             continue
         scoring = str(table.get("scoringType") or "rank").lower()
@@ -424,6 +448,34 @@ def payout_tiers(window: dict, event_id: str = "") -> list[dict]:
                 key, tier = ("rank", int(threshold)), dict(best, rank=int(threshold), share=None)
             if key not in tiers or KIND_ORDER.index(tier["kind"]) < KIND_ORDER.index(tiers[key]["kind"]):
                 tiers[key] = tier
+    for location in window.get("scoreLocations") or []:
+        if not isinstance(location, dict) or location is main:
+            continue
+        board = location.get("leaderboardEventWindowId") or ""
+        sessions = sum(1 for w in (event or {}).get("eventWindows") or []
+                       if any(isinstance(l, dict) and l.get("leaderboardEventWindowId") == board
+                              for l in w.get("scoreLocations") or [])) if board else 0
+        for table in location.get("payoutTables") or []:
+            if not isinstance(table, dict) or str(table.get("scoringType") or "rank").lower() != "rank":
+                continue
+            for row in table.get("ranks") or []:
+                if not isinstance(row, dict):
+                    continue
+                threshold = row.get("threshold")
+                if not isinstance(threshold, (int, float)) or isinstance(threshold, bool) \
+                        or threshold <= 0:
+                    continue
+                token = next((p for p in row.get("payouts") or []
+                              if isinstance(p, dict) and _opens_round(p)), None)
+                if token is None:
+                    continue
+                label = humanise_token(re.sub(r"(?i)deny", "", str(token.get("value") or "")),
+                                       event_id) or "Qualification"
+                # The session's own board, where it names a cut at this rank, has
+                # the say.
+                tiers.setdefault(("rank", int(threshold)), {"kind": "qualify", "label": label, "amount": None,
+                                                   "currency": None, "rank": int(threshold), "share": None,
+                                                   "total": True, "sessions": sessions})
     return sorted(tiers.values(),
                   key=lambda t: (t["rank"] is None, t["rank"] or 0, t["share"] or 0))
 
