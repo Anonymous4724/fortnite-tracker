@@ -672,6 +672,134 @@ def main() -> int:
         at_250 = db.get_finals(conn, db.find_by_window(conn, first["event_id"], first["window_id"])["id"]).get(250)
     check("the next build derives again what the stopped one lost", (1, 1750.0), (counts["updated"], at_250))
 
+    print("\n15. model.json: the Python model's forecasts, and nothing else")
+    # A database of its own: four weeks of cups, a final in one lobby, and
+    # standings carrying names that must stay out of the file.
+    import calibration
+    import contextlib
+    import copy
+    import export_model
+    from pathlib import Path
+    shop = os.path.join(workdir, "model.db")
+    db.init_db(shop)
+    table = {"placement": [[1, 1, 60], [2, 5, 40], [6, 25, 20], [26, 100, 5]], "kill": 2.0}
+
+    def cup(conn, family, region, day, field, level, team="Solo", stage="", games=10,
+            ranks=(1, 5, 10, 20, 25, 50, 100, 250, 500, 1000)):
+        ranks = [r for r in ranks if r <= field]
+        cid = db.create_competition(conn, f"{family} {region} {day}", region=region, team_mode=team,
+                                    start_time=f"{day} 18:00", end_time=f"{day} 21:00", ranks=ranks,
+                                    max_games=games, scoring=table)
+        db.update_competition(conn, cid, family=family, stage=stage, field_size=field,
+                              finished_at=f"{day} 21:00", round_no=9 if stage else 0)
+        db.set_finals(conn, cid, {r: round(level * (r / 20) ** -0.3, 1) for r in ranks})
+        db.set_standings(conn, cid, [{"rank": r, "name": f"SecretPlayer{cid}x{r}",
+                                      "members": [f"SecretMate{cid}x{r}"], "score": 99.0} for r in (1, 2)])
+        return cid
+
+    with db.session(shop) as conn:
+        for week, day in enumerate(("2026-07-04", "2026-07-11", "2026-07-18", "2026-07-25")):
+            cup(conn, "Solo Cup", "EU", day, 1200 + 50 * week, 200 + 5 * week)
+            cup(conn, "Solo Cup", "NAC", day, 900, 180 + week)
+            cup(conn, "Duo Cup", "EU", day, 800, 150 + week, team="Duo")
+            cup(conn, "Duo Cup", "EU", day, 40, 250 + week, team="Duo", stage="Final", games=6,
+                ranks=(1, 3, 5, 10, 20, 25))
+        # A cup typed in by hand, its field left blank.
+        for week, day in enumerate(("2026-07-05", "2026-07-12")):
+            db.create_history_entry(conn, "Hand Cup", "EU", day, {1: 300 + week, 20: 200 + week, 100: 150 + week},
+                                    max_games=10, scoring=table, team_mode="Solo")
+            # A cup followed in the app, closed without copying its thresholds.
+            tracked = db.create_competition(conn, "Tracked Cup", region="EU", team_mode="Solo",
+                                            start_time=f"{day} 18:00", end_time=f"{day} 21:00",
+                                            ranks=[20, 100], max_games=10, scoring=table)
+            db.update_competition(conn, tracked, family="Tracked Cup", field_size=1000,
+                                  finished_at=f"{day} 21:05")
+            db.add_snapshot(conn, tracked, ts=f"{day} 19:30", points={20: 90, 100: 60})
+            db.add_snapshot(conn, tracked, ts=f"{day} 21:05", points={20: 190 + week, 100: 140 + week})
+
+    budget = export_model.SIZE_BUDGET
+
+    def exported(conn, size=None):
+        export_model.SIZE_BUDGET = budget if size is None else size
+        try:
+            return export_model.build_model(conn, comps, calib)
+        finally:
+            export_model.SIZE_BUDGET = budget
+
+    def form_of(kind, rank, field):
+        return {"category": kind, "name": kind, "region": "EU", "team_mode": "Solo",
+                "game_mode": "Battle Royale", "max_games": 10, "field_size": field,
+                "scoring": table, "scoring_known": True, "rank": rank}
+
+    with db.session(shop) as conn:
+        comps = export_model.load_competitions(conn)
+        calib = export_model.calibration_of(comps)
+        # Every model below stays alive to the end: the export's lookups are
+        # cached by the identity of the lists they index.
+        model = exported(conn)
+        payload = export_model.encoded(model)
+        check("no player, no team, no standings in the file", [],
+              [word for word in ("SecretPlayer", "SecretMate") if word in payload])
+        found = export_model.verify(model, comps, calib)
+        check("the export reproduces the model it was built from, forecast for forecast",
+              (True, 0), (len(found["diffs"]) > 0, len(found["mismatches"])))
+        edges = [dict(c, **change) for c in comps[:6] for change in (
+            {"field_size": None}, {"field_size": -5}, {"max_games": None}, {"region": None},
+            {"team_mode": ""}, {"scoring": None}, {"ranks": list(c["ranks"]) + [5000]})]
+        check("and agrees on missing fields, no field, no games and ranks past the field", 0,
+              len(export_model.verify(model, edges, calib)["mismatches"]))
+
+        moved = copy.deepcopy(model)
+        for row in moved["categories"]:
+            for entry in row.get("direct", {}).values():
+                entry[0] *= 1.1
+        check("an export whose numbers moved is refused", True,
+              bool(export_model.verify(moved, comps[:8], calib)["mismatches"]))
+        lost = copy.deepcopy(model)
+        lost["families"] = []
+        found = export_model.verify(lost, comps[:8], calib)
+        check("a row missing though the budget cut nothing is a mismatch, not a trade",
+              (0, True), (len(found["traded"]), bool(found["mismatches"])))
+
+        full = len(payload.encode("utf-8"))
+        check("the file's labels carry characters of more than one byte", True, full > len(payload))
+        fitted = exported(conn, len(payload))
+        check("trimmed to a budget in bytes, the file fits it", True,
+              len(export_model.encoded(fitted).encode("utf-8")) <= len(payload))
+        for share in (0.9, 0.5):
+            trimmed = exported(conn, int(full * share))
+            found = export_model.verify(trimmed, comps, calib)
+            check(f"trimmed to {share:.0%}, the rows traded away are counted, not refused",
+                  (True, 0), (len(found["traded"]) > 0, len(found["mismatches"])))
+
+        hand = form_of("Hand Cup", 100, 1000)
+        want = calibration.prior_prediction(dict(hand, kind="Hand Cup", family="Hand Cup"), calib, 100)
+        got = export_model.predict_from_model(model, hand)
+        check("a cup typed in without its field keeps its previous edition",
+              ("previous edition", want.get("value")), (got.get("source"), got.get("value")))
+        # The app reads every tournament whole: a rank with no final is read
+        # off the readings, and the export has to read the same.
+        app = calibration.broad_stats(db.keep_for_training(db.all_full(conn))[0])
+        followed = form_of("Tracked Cup", 100, 1000)
+        want = calibration.prior_prediction(dict(followed, kind="Tracked Cup", family="Tracked Cup"), app, 100)
+        got = export_model.predict_from_model(model, followed)
+        check("a cup closed without copying its thresholds reads as it does in the app",
+              ("previous edition", want.get("value")), (got.get("source"), got.get("value")))
+
+    # Nothing finished, nothing compared: no model is written over the last one.
+    empty = os.path.join(workdir, "empty.db")
+    db.init_db(empty)
+    out = os.path.join(workdir, "empty-model.json")
+    saved_path, saved_argv = export_model.DB_PATH, sys.argv
+    export_model.DB_PATH, sys.argv = Path(empty), ["export_model.py", "--out", out]
+    try:
+        quiet = io.StringIO()
+        with contextlib.redirect_stdout(quiet), contextlib.redirect_stderr(quiet):
+            code = export_model.main()
+    finally:
+        export_model.DB_PATH, sys.argv = saved_path, saved_argv
+    check("an export that checked no forecast is not written", (1, False), (code, os.path.exists(out)))
+
     print("\n" + "=" * 68)
     if FAILURES:
         print(f"  {len(FAILURES)} failure(s):")

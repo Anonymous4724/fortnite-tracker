@@ -73,12 +73,14 @@ NONE = "__none__"
 
 
 def load_competitions(conn) -> list[dict]:
-    """Every tournament, without its points rows.
+    """Every tournament, its readings left out where its finals cover every rank.
 
     `db.all_full` brings the snapshots along — fine for 66 tournaments, ruinous
-    for the thousands the API harvest will land, and pointless: nothing the
-    export measures reads a snapshot. Only `predict.is_complete` does, and only
-    for its latest timestamp, which one aggregate query covers for the lot.
+    for the thousands the API harvest will land, and pointless where every
+    rank has its final: `predict.is_complete` wants only the latest timestamp,
+    which one aggregate query covers for the lot. A rank with no final is read
+    off the readings (`predict.final_value`) - a cup followed in the app and
+    closed without copying its thresholds - so those few bring theirs along.
     """
     latest = {row["competition_id"]: row["ts"] for row in conn.execute(
         "SELECT competition_id, MAX(ts) AS ts FROM snapshot GROUP BY competition_id")}
@@ -89,7 +91,10 @@ def load_competitions(conn) -> list[dict]:
             continue
         comp["finals"] = db.get_finals(conn, comp["id"])
         ts = latest.get(comp["id"])
-        comp["snapshots"] = [{"ts": ts, "points": {}}] if ts else []
+        if ts and {int(r) for r in comp.get("ranks") or ()} - set(comp["finals"]):
+            comp["snapshots"] = db.get_snapshots(conn, comp["id"])
+        else:
+            comp["snapshots"] = [{"ts": ts, "points": {}}] if ts else []
         out.append(comp)
     kept, dropped = db.keep_for_training(out)
     if dropped:
@@ -185,7 +190,9 @@ def _attach(rows: dict, pace: dict | None = None, fields: dict | None = None,
         level = (pace or {}).get(str(key)) or {}
         field = (fields or {}).get(str(key)) or {}
         shared = (share or {}).get(str(key)) or {}
-        if not level and not field and not shared:
+        # A cup typed in without its field has no level and no field size,
+        # and still its previous edition, which reads neither.
+        if not level and not field and not shared and not (direct or {}).get(str(key)):
             continue                      # a group the calibration never measured
         games = row["_games"]
         row = {k: v for k, v in row.items() if k != "_games"}
@@ -439,15 +446,22 @@ def trim_to_budget(model: dict, budget: int | None = None) -> dict:
     touched once there is no category left to give.
     """
     budget = SIZE_BUDGET if budget is None else budget
-    dropped = {}
+
+    def size(x) -> int:
+        # In bytes, as the file is written: a "·" in a label is two of them.
+        return len(encoded(x).encode("utf-8"))
+
+    # Written into the model as it is filled, so that its own bytes count too.
+    dropped: dict = {}
+    model.setdefault("source", {})["dropped"] = dropped
     for table in ("categories", "families"):
         rows = model[table]
         rows.sort(key=lambda r: (max(r["n"], r["field_n"]), r["last"]), reverse=True)
-        while rows and len(encoded(model)) > budget:
-            excess, cut = len(encoded(model)) - budget, 0
+        while rows and size(model) > budget:
+            excess, cut = size(model) - budget, 0
             while cut < len(rows) and excess > 0:
                 cut += 1
-                excess -= len(json.dumps(rows[-cut], ensure_ascii=False)) + 1
+                excess -= size(rows[-cut]) + 1
             del rows[len(rows) - cut:]
             dropped[table] = dropped.get(table, 0) + cut
     return dropped
@@ -1268,11 +1282,24 @@ def gave_up(model: dict, want: dict, t: dict) -> bool:
     falls through to the family, or to the mode, exactly as it would for a
     category it had never seen. Worth separating from a real disagreement, and
     worth counting — it is the price of the budget, in forecasts.
+
+    Only a row the budget did take away: one missing from a table the trim
+    never cut is a broken export, not a trade. And each rung is traced to the
+    row it read: the previous edition reads a category row - this cup's, or
+    the other format's it fell back on - and a family averaged with the
+    re-scored boards reads the family's.
     """
+    dropped = (model.get("source") or {}).get("dropped") or {}
     for source in (want.get("source"), want.get("guessed_field")):
-        if source == "category" and not category_row(model, t):
+        source, asked = str(source or "").split(" + ")[0], t
+        if source == "previous edition":
+            note = want.get("entry_note") or ()
+            if note and note[0] == "other_format":
+                asked = dict(t, team_mode=note[1], game_mode=note[2])
+            source = "category"
+        if source == "category" and dropped.get("categories") and not category_row(model, asked):
             return True
-        if source == "family" and not family_row(model, t):
+        if source == "family" and dropped.get("families") and not family_row(model, asked):
             return True
     return False
 
@@ -1511,7 +1538,11 @@ def verify(model: dict, comps: list[dict], calib: dict) -> dict:
                         want is not None and got is not None
                         and want.get("ok") == got.get("ok")
                         and for_page(want.get("reason")) == got.get("reason"))
-                    if not same and not gave_up(model, want or {}, form):
+                    # A refusal does not say where its field came from: the
+                    # last places of a lobby whose size was read off a row.
+                    guessed = None if int(form.get("field_size") or 0) > 0 else \
+                        (calibration.guess_field(variant, calib) or (0, None))[1]
+                    if not same and not gave_up(model, dict(want or {}, guessed_field=guessed), form):
                         mismatches.append((comp["name"], branch, rank, want, got))
                     continue
                 agreed = bool(got and got.get("ok")) and all(
@@ -1682,6 +1713,13 @@ def main() -> int:
                   file=sys.stderr)
         print("Nothing written: an export that disagrees with the model is worse than "
               "no export.", file=sys.stderr)
+        return 1
+    if not check["diffs"]:
+        # Nothing compared, nothing proved: a database with no finished cup -
+        # a fresh one, or `--before` a day with none - makes a model that
+        # forecasts nothing, and it would replace one that does.
+        print("\nNOT EXPORTED: not one forecast was checked against the model, for want "
+              "of a finished tournament to learn from. Nothing written.", file=sys.stderr)
         return 1
 
     out = Path(argument("--out") or OUT_PATH)
