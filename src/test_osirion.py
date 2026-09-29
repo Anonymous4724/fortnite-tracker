@@ -9,10 +9,12 @@ against fixtures whose right answers are known by construction.
 """
 from __future__ import annotations
 
+import io
 import json
 import os
 import sys
 import tempfile
+import time
 from datetime import datetime, timedelta, timezone
 
 FAILURES: list[str] = []
@@ -383,6 +385,292 @@ def main() -> int:
     check("a hand-entered row still reads its label", "Cup · Round 2",
           db.category_of({"family": "Cup", "stage": "Round 2", "round_no": 0,
                           "source": "history"}))
+
+    print("\n10. A board read while its cup ran is read again, and derived again")
+    # harvest.bat left running through a cup reads the board as it stands, as
+    # deep as its passes go. Once the cup has settled, a shallow pass reads it
+    # again from page zero - ten pages - and whatever the deeper passes then
+    # find on disk past that is still the board of that minute.
+    harvest.RAW = tempfile.mkdtemp(prefix="osirion-settle-")
+    served, asked = {"pages": 30, "top": 5000}, []          # an hour in: 5000 - rank
+
+    def moving_board(event_id, window_id, page=0):
+        asked.append(page)
+        ranks = range(page * 100 + 1, page * 100 + 101) if page < served["pages"] else ()
+        return {"success": True, "leaderboard": {"page": page, "totalPages": served["pages"], "entries": [
+            {"rank": r, "pointsEarned": float(served["top"] - r)} for r in ranks]}}
+
+    closed = datetime.now(timezone.utc) - timedelta(hours=20)
+    night = {"eventId": "epicgames_S42_NightCup_NAC", "regions": ["NAC"],
+             "displayData": {"titleLine1": "Night Cup"}}
+    ran = {"eventWindowId": "S42_NightCup_Event1Round1_NAC", "matchCap": 6,
+           "beginTime": (closed - timedelta(hours=3)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+           "endTime": closed.strftime("%Y-%m-%dT%H:%M:%SZ")}
+    cup = {"event_id": night["eventId"], "window_id": ran["eventWindowId"], "begin": ran["beginTime"],
+           "end": ran["endTime"], "round": 1, "event": night, "window": ran}
+
+    def aged(work, pages, when):
+        for page in pages:
+            os.utime(harvest.page_path(work, page), (when, when))
+
+    def stored(rank):
+        with db.session() as conn:
+            comp = db.find_by_window(conn, cup["event_id"], cup["window_id"])
+            return db.get_finals(conn, comp["id"]).get(rank) if comp else None
+
+    settled_at = harvest.settles_at(cup)
+    osirion.leaderboard_page = moving_board
+    try:
+        for depth in (10, 30, 101):                         # harvest.bat, during the cup
+            harvest.fetch_window(cup, depth)
+        aged(cup, range(30), closed.timestamp() - 3600)
+        served.update(pages=40, top=10000)                  # settled: 10000 - rank
+        harvest.fetch_window(cup, 10)                       # update.bat, after the close
+        aged(cup, range(10), settled_at + 600)
+        harvest.build([cup], pages=101)
+        check("a build before the deeper passes leaves the mid-session pages out", (9000.0, None),
+              (stored(1000), stored(2500)))
+        index = harvest.raw_path("index", cup["event_id"], f"{harvest.slug(cup['window_id'])}.json.gz")
+        os.utime(index, (time.time() - 3600,) * 2)          # derived an hour ago
+        asked.clear()
+        harvest.fetch_window(cup, 30)                       # harvest.bat's deeper passes
+        check("a deeper pass reads again the pages left on disk from mid-session",
+              list(range(10, 30)), asked)
+        check("and the window is derived again, with no more pages than before", 1,
+              harvest.build([cup], pages=101)["updated"])
+        asked.clear()
+        harvest.fetch_window(cup, 101)
+        check("the deepest pass reaches the settled board's last page, not the running one's",
+              list(range(30, 40)), asked)
+        harvest.build([cup], pages=101)
+        check("the deep ranks are the settled board's", (9000.0, 7500.0), (stored(1000), stored(2500)))
+        check("run again and nothing is derived twice", 1, harvest.build([cup], pages=101)["already"])
+
+        # A cut's page is read on the first pass, beside the first pages. One
+        # left from mid-session - the run stopped before it, or its request
+        # failed - is read again, though page zero was read after the close.
+        paying = dict(ran, eventWindowId="S42_NightCup_Event2Round1_NAC", scoreLocations=[
+            {"isMain": True, "payoutTables": [{"scoringType": "rank", "ranks": [
+                {"threshold": 1500, "payouts": [{"rewardType": "token", "quantity": 1,
+                                                 "value": "S42_NightCup_Event2Round2_NAC"}]}]}]}])
+        cut = dict(cup, window_id=paying["eventWindowId"], window=paying)
+        harvest.fetch_window(cut, 3)
+        aged(cut, [14], closed.timestamp() - 3600)
+        asked.clear()
+        harvest.fetch_window(cut, 3)
+        check("a cut's page read before the close is read again", [14], asked)
+
+        # refresh.bat without --fetch derives what is on disk, and reads
+        # nothing again: a board read while its cup ran is not its result.
+        early = dict(cup, window_id="S42_NightCup_Event3Round1_NAC",
+                     window=dict(ran, eventWindowId="S42_NightCup_Event3Round1_NAC"))
+        served.update(pages=30, top=5000)
+        harvest.fetch_window(early, 10)
+        aged(early, range(10), closed.timestamp() - 3600)
+        check("a board read while its cup ran, and not since, is not derived", 0,
+              harvest.build([early], pages=101)["written"])
+    finally:
+        osirion.leaderboard_page = real_page
+
+    print("\n11. A network failure is not an answer")
+    # The API down for a while - a 503 that outlasts the retries, a connection
+    # dropped before the answer came - says nothing about the window. Written
+    # down as its answer, it told every later pass the window never ran.
+    import http.client
+    import urllib.error
+    harvest.RAW = tempfile.mkdtemp(prefix="osirion-net-")
+    outage = {"error": None}
+
+    def network(request, timeout=None):
+        if outage["error"] is not None:
+            raise outage["error"]
+        page = int(request.full_url.rsplit("page=", 1)[1])
+        return io.BytesIO(json.dumps({"success": True, "leaderboard": {"page": page, "totalPages": 3, "entries": [
+            {"rank": page * 100 + i + 1, "pointsEarned": 50.0} for i in range(100)]}}).encode())
+
+    def window(name):
+        return {"event_id": "epicgames_S42_NetCup_EU", "window_id": f"S42_NetCup_{name}_EU",
+                "begin": "2026-09-01T17:00:00Z", "end": "2026-09-01T20:00:00Z"}
+
+    real_urlopen, real_sleep = osirion.urllib.request.urlopen, time.sleep
+    osirion.urllib.request.urlopen, time.sleep = network, (lambda seconds: None)
+    try:
+        down = window("Event1Round1")
+        outage["error"] = urllib.error.HTTPError("https://api", 503, "Service Unavailable", {}, None)
+        harvest.fetch_window(down, 3)
+        check("a 503 that outlasts the retries leaves nothing on disk", None, harvest.read_page(down, 0))
+        outage["error"] = None
+        harvest.fetch_window(down, 3)
+        check("and the next pass reads the window once the API is back", 300,
+              len(harvest.saved_entries(down, 3)))
+        outage["error"] = http.client.RemoteDisconnected("Remote end closed connection without response")
+        try:
+            harvest.fetch_window(window("Event2Round1"), 3)
+            raised = None
+        except Exception as exc:                                    # noqa: BLE001
+            raised = type(exc).__name__
+        check("a connection dropped before the answer is waited out, not a crash", None, raised)
+        never = window("Event3Round1")
+        outage["error"] = urllib.error.HTTPError("https://api", 404, "Not Found", {}, None)
+        harvest.fetch_window(never, 3)
+        check("a window that never ran, a 404, is still noted as empty", 0,
+              osirion.total_pages(harvest.read_page(never, 0) or {}))
+    finally:
+        osirion.urllib.request.urlopen, time.sleep = real_urlopen, real_sleep
+
+    print("\n12. The live feed's readings are filed once, however often the pull runs")
+    # A rank read off a page the API stamped at another minute than the run's
+    # first page carries that page's updatedAt, as worker.js keeps it: ISO,
+    # with a T. The day's file is pulled on three runs in a row (DAYS).
+    import pull_live
+    with db.session() as conn:
+        followed = db.create_competition(conn, "Feed Cup", region="NAC",
+                                         start_time="2026-09-28 17:00", end_time="2026-09-28 20:00")
+        db.update_competition(conn, followed, event_id="epicgames_S42_FeedCup_NAC",
+                              window_id="S42_FeedCup_Event1Round1_NAC")
+    day_file = {"windows": {"S42_FeedCup_Event1Round1_NAC": {
+        "event": "epicgames_S42_FeedCup_NAC", "window": "S42_FeedCup_Event1Round1_NAC",
+        "name": "Feed Cup", "region": "NAC", "begin": "2026-09-28T17:00:00.000Z", "end": "2026-09-28T20:00:00.000Z",
+        "readings": [{"updated": "2026-09-28T18:40:07.512Z", "games": 3,
+                      "readings": [[100, 90.0], [500, 60.0], [1000, 41.0, "2026-09-28T18:38:02.117Z"]]},
+                     {"updated": "2026-09-28T18:50:05.004Z", "games": 4,
+                      "readings": [[100, 101.0], [500, 66.0], [1000, 45.0]]}]}}}
+    real_fetch, filed = pull_live.fetch, []
+    pull_live.fetch = lambda url: day_file
+    try:
+        for _ in range(3):
+            with db.session() as conn:
+                for window in pull_live.gather("https://feed.invalid", 1).values():
+                    pull_live.file_window(conn, window, False)
+            with db.session() as conn:
+                filed.append(len(db.get_snapshots(conn, followed)))
+    finally:
+        pull_live.fetch = real_fetch
+    check("three pulls of the same day file each reading once", [3, 3, 3], filed)
+    with db.session() as conn:
+        check("a page's own stamp is filed at its own minute",
+              ["2026-09-28 18:38", "2026-09-28 18:40", "2026-09-28 18:50"],
+              [str(s["ts"])[:16] for s in db.get_snapshots(conn, followed)])
+
+    print("\n13. What the publish pushes: nothing private, whoever made the commit")
+    # A clone of this repository and a bare one playing GitHub. refresh.py
+    # pushes every commit GitHub does not have yet - a run's, or one made by
+    # hand - so the rule that keeps data, keys and local notes out of the
+    # run's own commit has to hold for all of them.
+    import shutil
+    import subprocess
+    from pathlib import Path
+    import refresh
+    if not shutil.which("git"):
+        print("   (git is not installed here: skipped)")
+    else:
+        sandbox = Path(tempfile.mkdtemp(prefix="osirion-publish-"))
+        (sandbox / "gitconfig").write_text("[user]\n\tname = Test\n\temail = test@example.invalid\n"
+                                           "[commit]\n\tgpgsign = false\n")
+        saved_env = dict(os.environ)
+        os.environ.update(GIT_CONFIG_GLOBAL=str(sandbox / "gitconfig"), GIT_CONFIG_NOSYSTEM="1",
+                          GIT_TERMINAL_PROMPT="0", GIT_AUTHOR_NAME="Test", GIT_COMMITTER_NAME="Test",
+                          GIT_AUTHOR_EMAIL="test@example.invalid", GIT_COMMITTER_EMAIL="test@example.invalid")
+
+        def git(*args, cwd=sandbox / "tracker"):
+            return subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, text=True)
+
+        def write(*names):
+            for name in names:
+                (sandbox / "tracker" / name).parent.mkdir(parents=True, exist_ok=True)
+                (sandbox / "tracker" / name).write_text(name + "\n")
+
+        def on_github():
+            return git("--git-dir", str(sandbox / "github.git"), "ls-tree", "-r", "--name-only", "main").stdout.split()
+
+        real_root = refresh.ROOT
+        try:
+            git("init", "-q", "--bare", str(sandbox / "github.git"), cwd=sandbox)
+            (sandbox / "tracker").mkdir()
+            git("init", "-q")
+            if (real_root / ".gitignore").exists():
+                shutil.copy(real_root / ".gitignore", sandbox / "tracker" / ".gitignore")
+            write("README.md")
+            git("add", "-A")
+            git("commit", "-q", "-m", "seed")
+            git("branch", "-M", "main")
+            git("remote", "add", "origin", str(sandbox / "github.git"))
+            git("push", "-q", "-u", "origin", "main")
+            refresh.ROOT = sandbox / "tracker"
+            # Committed by hand: two names .gitignore does not cover, three
+            # forced past it.
+            write("api_token.json", "src/tool.py", "cito_key.txt", "notes.local.md", "data/tracker.db")
+            git("add", "-A")
+            git("add", "-f", "cito_key.txt", "notes.local.md", "data/tracker.db")
+            git("commit", "-q", "-m", "by hand")
+            pushed = refresh.publish_tracker(lambda text: text)
+            check("a commit made by hand that carries a key, a note or data is not pushed",
+                  (False, []), (pushed, [name for name in on_github() if refresh.NEVER.search(name)]))
+            git("reset", "-q", "--hard", "origin/main")
+            write("src/other_tool.py")
+            git("add", "-A")
+            git("commit", "-q", "-m", "by hand, code only")
+            check("one that carries code only is", (True, True),
+                  (refresh.publish_tracker(lambda text: text), "src/other_tool.py" in on_github()))
+            # A note committed before .gitignore covered it is taken out of
+            # the repository, and that deletion is not held back.
+            write("old.local.md", "héritage.local.md")
+            git("add", "-f", "old.local.md", "héritage.local.md")
+            git("commit", "-q", "-m", "notes, before the rule")
+            git("push", "-q", "origin", "main")
+            pushed = refresh.publish_tracker(lambda text: text)
+            names = git("--git-dir", str(sandbox / "github.git"), "ls-tree", "-r", "-z", "--name-only", "main").stdout
+            check("private notes git already follows are taken out, an accented name too", (True, []),
+                  (pushed, [name for name in names.split("\0") if name.endswith(".local.md")]))
+        finally:
+            refresh.ROOT = real_root
+            os.environ.clear()
+            os.environ.update(saved_env)
+
+    print("\n14. A build stopped midway is made again")
+    # A chunk's derivations reach the database together, when it commits.
+    # Window A, read again, is derived again; the build stops on window B,
+    # before the commit - a Ctrl-C. The next build must not take A for done.
+    harvest.RAW = tempfile.mkdtemp(prefix="osirion-chunk-")
+    ended = datetime.now(timezone.utc) - timedelta(days=2)
+
+    def chunk_work(name):
+        event = {"eventId": "epicgames_S42_ChunkCup_EU", "regions": ["EU"],
+                 "displayData": {"titleLine1": "Chunk Cup"}}
+        window = {"eventWindowId": f"S42_ChunkCup_{name}_EU", "matchCap": 6,
+                  "beginTime": (ended - timedelta(hours=3)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                  "endTime": ended.strftime("%Y-%m-%dT%H:%M:%SZ")}
+        return {"event_id": event["eventId"], "window_id": window["eventWindowId"], "begin": window["beginTime"],
+                "end": window["endTime"], "round": 1, "event": event, "window": window}
+
+    def lay(work, top):
+        for page in range(3):
+            harvest.save(harvest.page_path(work, page), {"success": True, "leaderboard": {
+                "page": page, "totalPages": 3, "entries": [
+                    {"rank": r, "pointsEarned": float(top - r)} for r in range(page * 100 + 1, page * 100 + 101)]}})
+
+    first, second = chunk_work("Event1Round1"), chunk_work("Event2Round1")
+    lay(first, 1000)
+    harvest.build([first], pages=3)
+    index = harvest.raw_path("index", first["event_id"], f"{harvest.slug(first['window_id'])}.json.gz")
+    os.utime(index, (time.time() - 3600,) * 2)          # derived an hour ago
+    lay(first, 2000)                                    # read again since
+    lay(second, 900)
+
+    def stopped(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    real_create, db.create_competition = db.create_competition, stopped
+    try:
+        harvest.build([first, second], pages=3)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        db.create_competition = real_create
+    counts = harvest.build([first, second], pages=3)
+    with db.session() as conn:
+        at_250 = db.get_finals(conn, db.find_by_window(conn, first["event_id"], first["window_id"])["id"]).get(250)
+    check("the next build derives again what the stopped one lost", (1, 1750.0), (counts["updated"], at_250))
 
     print("\n" + "=" * 68)
     if FAILURES:

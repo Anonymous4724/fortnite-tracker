@@ -193,13 +193,16 @@ def file_window(conn, window: dict, dry: bool) -> tuple[int, int]:
                 continue
             if rank < 1 or value <= 0:
                 continue
-            stamp = str(r[2])[:16] if len(r) > 2 and r[2] else when[:16]
-            groups.setdefault(stamp, {})[rank] = value
-        for stamp, points in sorted(groups.items()):
-            if stamp in seen:
+            # The page's stamp is the API's updatedAt as the worker keeps it,
+            # ISO with a T: read into the database's spelling, or it never
+            # matches a minute already filed and every pull files it again.
+            minute = (stamp(r[2]) if len(r) > 2 and r[2] else None) or when[:16]
+            groups.setdefault(minute, {})[rank] = value
+        for minute, points in sorted(groups.items()):
+            if minute in seen:
                 skipped += 1
                 continue
-            ts = when if stamp == when[:16] else stamp
+            ts = when if minute == when[:16] else minute
             if not dry:
                 # A sealed lobby's reading is the board at the end of its last
                 # finished game, and says when a game was under way at the time.
@@ -212,7 +215,7 @@ def file_window(conn, window: dict, dry: bool) -> tuple[int, int]:
                                 ranked=reading.get("ranked") or None,
                                 note="live feed" + (" · final" if reading.get("final") else "")
                                      + (" · game under way" if reading.get("partial") else ""))
-            seen.add(stamp)
+            seen.add(minute)
             filed += 1
     return filed, skipped
 

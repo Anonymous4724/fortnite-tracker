@@ -17,6 +17,7 @@ is used once, offline, to build the training set.
 """
 from __future__ import annotations
 
+import http.client
 import json
 import time
 import urllib.error
@@ -42,6 +43,12 @@ REGIONS = ["EU", "NAC", "NAE", "NAW", "BR", "ASIA", "OCE", "ME", "ONSITE"]
 
 class OsirionError(RuntimeError):
     """The API answered, but not with something usable."""
+
+
+class OsirionUnreachable(OsirionError):
+    """No answer at all: the network, a timeout, or a 429 or a 5xx that
+    outlasted the retries. It says nothing about what was asked for - ask
+    again later rather than take it for the answer."""
 
 
 class _Throttle:
@@ -90,14 +97,19 @@ def get(path: str, tries: int = 4, **params) -> dict:
         except urllib.error.HTTPError as exc:
             # 429 means we misjudged the limit; 5xx means their side. Both are
             # worth waiting out. A 4xx that is not 429 will never get better.
-            if exc.code not in (429, 500, 502, 503, 504) or attempt == tries - 1:
+            if exc.code not in (429, 500, 502, 503, 504):
                 raise OsirionError(f"{path}: HTTP {exc.code}") from exc
-            time.sleep(5 * (attempt + 1))
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
             if attempt == tries - 1:
-                raise OsirionError(f"{path}: {exc}") from exc
+                raise OsirionUnreachable(f"{path}: HTTP {exc.code}") from exc
+            time.sleep(5 * (attempt + 1))
+        except (OSError, http.client.HTTPException, ValueError) as exc:
+            # The network, a timeout, a connection dropped before or during
+            # the answer - urllib wraps only some of these in URLError - or a
+            # body cut short or not JSON.
+            if attempt == tries - 1:
+                raise OsirionUnreachable(f"{path}: {exc}") from exc
             time.sleep(3 * (attempt + 1))
-    raise OsirionError(f"{path}: gave up after {tries} attempts")
+    raise OsirionUnreachable(f"{path}: gave up after {tries} attempts")
 
 
 def tournaments(region: str | None = None, historic: bool = True) -> list[dict]:

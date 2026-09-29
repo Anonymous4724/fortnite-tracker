@@ -304,7 +304,7 @@ def still_running(work: dict) -> bool:
     return at is not None and time.time() < at
 
 
-def too_early(work: dict) -> bool:
+def too_early(work: dict, page: int = 0) -> bool:
     """Was this window read before its cup had finished, and is it over now?
 
     Read before it starts, the API answers with an empty board and
@@ -319,12 +319,16 @@ def too_early(work: dict) -> bool:
     calendar runs weeks ahead: asking it again every night would be hundreds
     of calls a run for an empty board we can predict. Its empty page stays on
     disk until the cup has actually been played.
+
+    `page` asks it of another page than the first. Read again from page zero,
+    a window is read as deep as the pass goes; a page past that, read while
+    the cup ran, is read again by the deeper pass that reaches it.
     """
     settled = settles_at(work)
     if settled is None or time.time() < settled:
         return False
     try:
-        written = os.path.getmtime(page_path(work, 0))
+        written = os.path.getmtime(page_path(work, page))
     except OSError:
         return False
     return written < settled
@@ -365,10 +369,17 @@ def fetch_window(work: dict, pages: int) -> int:
         limit = min(limit, settled)
 
     while page < limit:
-        saved = None if stale else read_page(work, page)
+        # A page on disk from before the board settled is read again too:
+        # kept, it held the deep ranks at their mid-session points, and its
+        # page count - the board's size at that minute - cut the pass short.
+        saved = None if stale or too_early(work, page) else read_page(work, page)
         if saved is None:
             try:
                 saved = osirion.leaderboard_page(work["event_id"], work["window_id"], page)
+            except osirion.OsirionUnreachable:
+                # No answer - the network, or the API's side: nothing is known
+                # about the window, and nothing is written. A later pass asks.
+                return calls + 1
             except osirion.OsirionError as exc:
                 # A window that never ran 404s on page 0. Note it so no future
                 # pass asks again.
@@ -386,7 +397,8 @@ def fetch_window(work: dict, pages: int) -> int:
     # The cuts' pages, past the ones just read: one request per cut, on the
     # first pass, so the latest edition carries the rank it was played for.
     for number in cut_pages(work, settled):
-        if number < page or (not stale and read_page(work, number) is not None):
+        if number < page or (not (stale or too_early(work, number))
+                             and read_page(work, number) is not None):
             continue
         try:
             saved = osirion.leaderboard_page(work["event_id"], work["window_id"], number)
@@ -549,9 +561,15 @@ def saved_entries(work: dict, pages: int) -> list[dict]:
     The pages read in sequence, then the cuts' pages beyond them: those sit
     alone past a gap, and a walk that stopped at the gap would leave the rank
     the cup was played for on disk and out of the database.
+
+    A page read while the board was still moving is left out once it has
+    settled (see too_early), until a pass reads it again: its ranks hold the
+    points of that minute, and derived, they would stand as the cup's result.
     """
     rows, page = [], 0
     for page in range(min(max(pages, 1), PAGE_CAP)):
+        if too_early(work, page):
+            continue
         payload = read_page(work, page)
         if payload is None:
             break
@@ -566,7 +584,7 @@ def saved_entries(work: dict, pages: int) -> list[dict]:
         run += 1
     extra = {n for n in cut_pages(work, known_pages(work)) if n > page} | set(pages_beyond(work, run))
     for number in sorted(extra):
-        payload = read_page(work, number)
+        payload = None if too_early(work, number) else read_page(work, number)
         if payload is not None:
             rows += osirion.entries_of(payload)
     rows.sort(key=lambda e: e.get("rank") or 10 ** 9)
@@ -842,15 +860,22 @@ def pages_on_disk(work: dict) -> int:
 
 
 def read_again(work: dict) -> bool:
-    """Was the window's first page downloaded again after its last derivation?
+    """Was a page of this window downloaded again after its last derivation?
 
     A window read too early (see too_early) is read again from page zero once
-    it has settled - usually as many pages as before, so counting pages does
-    not see that everything in them changed. The first page being newer than
-    the derivation does."""
+    it has settled, and its deeper pages by the passes that reach them -
+    usually as many pages as before, so counting pages does not see that
+    everything in them changed. A page newer than the derivation does: the
+    first, or any other."""
     index = raw_path("index", work["event_id"], f"{slug(work['window_id'])}.json.gz")
+    folder = os.path.dirname(page_path(work, 0))
+    prefix = slug(work["window_id"]) + "_p"
     try:
-        return os.path.getmtime(page_path(work, 0)) > os.path.getmtime(index)
+        derived = os.path.getmtime(index)
+        with os.scandir(folder) as found:
+            return any(entry.name.startswith(prefix) and entry.name.endswith(".json.gz")
+                       and entry.name[len(prefix):-len(".json.gz")].isdigit()
+                       and entry.stat().st_mtime > derived for entry in found)
     except OSError:
         return False
 
@@ -901,6 +926,7 @@ def build(work_list: list[dict], pages: int, limit: int | None = None,
 
     started = time.monotonic()
     for offset in range(0, len(ready), chunk):
+        derived = []
         with db.session() as conn:
             known = {(c["event_id"], c["window_id"]): c["id"]
                      for c in db.list_competitions(conn)
@@ -912,14 +938,14 @@ def build(work_list: list[dict], pages: int, limit: int | None = None,
                     if seen is not None and pages_on_disk(work) <= seen and not read_again(work):
                         counts["already"] += 1
                         continue
+                began = time.time()
                 entries = saved_entries(work, pages)
                 finals = thresholds_of(entries, cut_ranks(work))
                 if len(finals) < 3:
                     counts["too_few"] += 1
                     continue
-                save(raw_path("index", work["event_id"],
-                              f"{slug(work['window_id'])}.json.gz"),
-                     index_window(work, entries, None))
+                derived.append((raw_path("index", work["event_id"], f"{slug(work['window_id'])}.json.gz"),
+                                index_window(work, entries, None), began))
 
                 event, window = work["event"], work["window"]
                 scoring, agreement, kind = osirion.best_scoring(window, entries)
@@ -990,6 +1016,13 @@ def build(work_list: list[dict], pages: int, limit: int | None = None,
                                       db.category_of(db.get_competition(conn, comp_id)),
                                       region, tiers[:12])
 
+        # A derivation is noted on disk once the chunk is committed: one the
+        # database lost to a Ctrl-C was otherwise taken for done by the next
+        # build. Dated from when it began reading, so a page a fetch running
+        # alongside wrote meanwhile is newer, and read again (see read_again).
+        for path, summary, began in derived:
+            save(path, summary)
+            os.utime(path, (began, began))
         done = min(offset + chunk, len(ready))
         elapsed = time.monotonic() - started
         eta = (len(ready) - done) * elapsed / done / 60 if done else 0

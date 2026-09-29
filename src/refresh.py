@@ -167,9 +167,11 @@ def untrack_ignored(repo: Path, dry: bool = False) -> None:
     a rule added after a file was committed leaves it in the repository — and
     on the site — for good. The files stay on disk; they stop being published.
     """
-    listed = subprocess.run(["git", "ls-files", "-i", "-c", "--exclude-standard"],
-                            cwd=str(repo), capture_output=True, text=True)
-    files = [line.strip() for line in listed.stdout.splitlines() if line.strip()]
+    # -z: names as they are. Quoted, a name with an accent matched nothing,
+    # and `git rm` refused the whole list over it.
+    listed = subprocess.run(["git", "ls-files", "-z", "-i", "-c", "--exclude-standard"],
+                            cwd=str(repo), capture_output=True, text=True, encoding="utf-8")
+    files = [path for path in listed.stdout.split("\0") if path]
     if listed.returncode or not files:
         return
     print(f"\n  {len(files)} file(s) now ignored are still in the repository — taking "
@@ -214,7 +216,10 @@ def publish_tracker(label, dry: bool = False) -> bool:
     # same rule as a new file: a name that looks like data, a key or a local
     # note is taken back out of the commit. -z: names as they are, not quoted.
     staged = [path for path in git("diff", "--cached", "--name-only", "-z").stdout.split("\0") if path]
-    held_back = [path for path in staged if NEVER.search(path)]
+    # A private file taken out of the repository (untrack_ignored, above)
+    # leaves as a deletion: only what the commit would add or change is held.
+    changed = {path for path in git("diff", "--cached", "--name-only", "-z", "--diff-filter=d").stdout.split("\0") if path}
+    held_back = [path for path in staged if path in changed and NEVER.search(path)]
     if held_back:
         git("reset", "-q", "--", *held_back)
         staged = [path for path in staged if path not in held_back]
@@ -233,6 +238,18 @@ def publish_tracker(label, dry: bool = False) -> bool:
     if ahead.returncode == 0 and ahead.stdout.strip() == "0":
         print("  nothing changed since the last publish")
         return True
+    # What leaves is every commit GitHub does not have yet - this run's, an
+    # owed one, or one made by hand - and each answers to the same rule: a
+    # file one of them adds or changes, named like data, a key or a local
+    # note, stops the push. Taken out by a later commit, it would still be in
+    # the history that goes.
+    carried = git("log", "--format=", "--name-only", "--no-renames", "--diff-filter=d", "-z", "@{u}..HEAD")
+    private = sorted({path for path in carried.stdout.split("\0") if path and NEVER.search(path)})
+    if private:
+        print("  not pushed: a commit GitHub does not have yet carries " + ", ".join(private)
+              + '.\n  Undo the local commits with  git reset --soft "@{u}" , unstage those files '
+              "and run again. Nothing of this repository was published.")
+        return False
     for command in (["pull", "--rebase", "--autostash", "--quiet"], ["push", "--quiet"]):
         # Not captured: a push may need the credential helper's window once.
         if subprocess.run(["git", *command], cwd=str(ROOT)).returncode:
