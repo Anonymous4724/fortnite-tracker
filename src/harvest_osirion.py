@@ -207,7 +207,9 @@ def page_path(work: dict, page: int) -> str:
 def pages_beyond(work: dict, run: int) -> list[int]:
     """The pages of this window on disk past the run from page zero: the cuts'
     pages, and the one or two read to find where the rosters' percentiles
-    step up (see fetch_field_pages)."""
+    step up (see fetch_field_pages). A page read before the board settled is
+    left out: it holds the cup at that minute, and its step is where the
+    field stood then, not where it ended (see taken_before_settling)."""
     folder = os.path.dirname(page_path(work, 0))
     prefix = slug(work["window_id"]) + "_p"
     numbers = []
@@ -218,7 +220,7 @@ def pages_beyond(work: dict, run: int) -> list[int]:
     for name in names:
         if name.startswith(prefix) and name.endswith(".json.gz"):
             digits = name[len(prefix):-len(".json.gz")]
-            if digits.isdigit() and int(digits) >= run:
+            if digits.isdigit() and int(digits) >= run and not taken_before_settling(work, int(digits)):
                 numbers.append(int(digits))
     return sorted(numbers)
 
@@ -328,6 +330,23 @@ def too_early(work: dict) -> bool:
     return written < settled
 
 
+def taken_before_settling(work: dict, page: int) -> bool:
+    """Was this page read while its window's board was still moving?
+
+    too_early asks it of page zero and reads the window again from there. The
+    pages read past that run to find the field are not read again with it: a
+    run made while Europe's qualifier was an hour in would have left the page
+    where 50,000 players stepped up to a tenth, and every later run would have
+    taken the 57,465 who finished for 50,000."""
+    settled = settles_at(work)
+    if settled is None:
+        return False
+    try:
+        return os.path.getmtime(page_path(work, page)) < settled
+    except OSError:
+        return False
+
+
 def fetch_window(work: dict, pages: int) -> int:
     """Download the pages we are missing, and no more than the window has.
 
@@ -378,8 +397,9 @@ def fetch_window(work: dict, pages: int) -> int:
     # At the API's ceiling, the page where the percentiles step up, for the
     # windows of the last RECENT_DAYS: a few requests once, and the field is
     # known to a few rosters (see field_of). Older ones keep the least the
-    # pages on disk allow.
-    if settled is not None and settled >= PAGES_CEILING and not stale and recent(work):
+    # pages on disk allow. Not while the window runs: its step is still moving.
+    # A window just read again from page zero is searched in the same pass.
+    if settled is not None and settled >= PAGES_CEILING and not still_running(work) and recent(work):
         calls += fetch_field_pages(work)
     return calls
 
@@ -404,14 +424,16 @@ def field_page(low: float, high: float) -> int:
 
 def fetch_field_pages(work: dict) -> int:
     """Halve the field's bounds, a page at a time, until a page on disk holds
-    the step: seven requests at most, none once it is found."""
+    the step: seven requests at most, none once it is found. A page read
+    before the board settled is read again rather than taken as an answer."""
     calls = 0
     for _ in range(FIELD_CALLS):
         bounds = osirion.field_bounds(saved_entries(work, PAGE_CAP))
         if not bounds or bounds[1] - bounds[0] <= FIELD_PIN:
             break
         number = field_page(*bounds)
-        if number < 0 or read_page(work, number) is not None:
+        if number < 0 or (read_page(work, number) is not None
+                          and not taken_before_settling(work, number)):
             break
         try:
             saved = osirion.leaderboard_page(work["event_id"], work["window_id"], number)
@@ -599,8 +621,11 @@ def field_of(work: dict, entries: list[dict]) -> int:
     if per_page <= 0:
         return deepest
     held = math.ceil(len(entries) / per_page)
-    if held >= total:
-        return deepest                       # the whole board is on disk
+    # The whole board is on disk - unless it is the API's hundred pages, full
+    # to the last row: those are the first ten thousand of a bigger board, and
+    # the percentiles below say how big.
+    if held >= total and (total < PAGES_CEILING or deepest < total * per_page):
+        return deepest
     estimate = max(deepest, (total - 1) * per_page + per_page // 2)
     # At the API's ceiling the page count only says "ten thousand or more".
     # The rosters' percentiles say how many more (osirion.field_bounds): to a
@@ -612,7 +637,8 @@ def field_of(work: dict, entries: list[dict]) -> int:
         low, high = bounds
         # Below the ceiling the page count checks the percentiles, and they
         # replace its half page of doubt: Oceania's 4,525 read 4,550 here.
-        if high - low <= FIELD_PIN:
+        # Bounds that cross - pages of two different moments - pin nothing.
+        if 0 < high - low <= FIELD_PIN:
             pinned = round((low + high) / 2)
             if total >= PAGES_CEILING or (total - 1) * per_page < pinned <= total * per_page:
                 return max(pinned, deepest)

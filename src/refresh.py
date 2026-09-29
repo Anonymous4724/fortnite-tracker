@@ -210,8 +210,17 @@ def publish_tracker(label, dry: bool = False) -> bool:
     git("add", "-u")
     if new:
         git("add", "--", *new)
-    staged = [line.strip() for line in git("diff", "--cached", "--name-only").stdout.splitlines() if line.strip()]
+    # What git already follows, or what was staged by hand, answers to the
+    # same rule as a new file: a name that looks like data, a key or a local
+    # note is taken back out of the commit. -z: names as they are, not quoted.
+    staged = [path for path in git("diff", "--cached", "--name-only", "-z").stdout.split("\0") if path]
+    held_back = [path for path in staged if NEVER.search(path)]
+    if held_back:
+        git("reset", "-q", "--", *held_back)
+        staged = [path for path in staged if path not in held_back]
     print(f"\n{label('Publish this repository')}")
+    if held_back:
+        print("  kept out of the commit: " + ", ".join(held_back))
     if staged:
         stamp = date.today().isoformat()
         message = f"Model refresh {stamp}" if set(staged) <= DERIVED else f"Code update {stamp}"

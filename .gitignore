@@ -4,6 +4,11 @@
 *cle_*.txt
 .env
 
+# Databases and private notes stay on this machine, wherever they sit.
+*.db
+*.sqlite*
+*.local.md
+
 # Local data: the tracking database, archived tournaments, API dumps.
 # The app rebuilds an empty database on first start.
 data/

@@ -13,6 +13,7 @@ import json
 import os
 import sys
 import tempfile
+from datetime import datetime, timedelta, timezone
 
 FAILURES: list[str] = []
 
@@ -249,6 +250,51 @@ def main() -> int:
           True, abs(harvest.field_of(below, harvest.saved_entries(below, 10)) - 4525) <= 5)
     check("a board whose rosters carry no percentile says nothing", None,
           osirion.field_bounds([{"rank": 5, "pointsEarned": 3.0}]))
+
+    # A hundred full pages are the first ten thousand of a bigger board, not
+    # the whole of it: the percentiles in them still say how big.
+    held = {"event_id": "e6", "window_id": "w6"}
+    for page in range(100):
+        board_page(held, page, 57465, 100)
+    check("a capped board held to its hundredth page still reads its field off the percentiles",
+          57465, harvest.field_of(held, harvest.saved_entries(held, 100)))
+    # Pages of two moments can disagree: bounds that cross pin nothing.
+    crossed = {"event_id": "e7", "window_id": "w7"}
+    for page in range(3):
+        board_page(crossed, page, 57465, 100)
+    board_page(crossed, 29, 30000, 100)         # a board of 30,000 steps up at rank 3,000
+    board_page(crossed, 30, 57465, 100)         # this one is still at nought past it
+    check("bounds that cross give the least the pages allow, not their middle", 31000,
+          harvest.field_of(crossed, harvest.saved_entries(crossed, 3)))
+
+    # A page read while the board was filling holds the field of that minute.
+    settled_work = {"event_id": "e8", "window_id": "w8",
+                    "begin": "2026-01-10T17:00:00Z", "end": "2026-01-10T20:00:00Z"}
+    for page in range(3):
+        board_page(settled_work, page, 57465, 100)
+    board_page(settled_work, 49, 50000, 100)   # the step of the 50,000 who had played by then
+    before = harvest.settles_at(settled_work) - 3600
+    os.utime(harvest.page_path(settled_work, 49), (before, before))
+    check("a page read before its board settled is not counted", [],
+          harvest.pages_beyond(settled_work, 3))
+    check("so its step pins nothing: the page count's reading stands", 9950,
+          harvest.field_of(settled_work, harvest.saved_entries(settled_work, 3)))
+    # And no field page is asked for while the window runs.
+    now = datetime.now(timezone.utc)
+    running = {"event_id": "e9", "window_id": "w9",
+               "begin": (now - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+               "end": (now + timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")}
+    for page in range(3):
+        board_page(running, page, 30000, 100)
+    asked = []
+    real_page = osirion.leaderboard_page
+    osirion.leaderboard_page = lambda event_id, window_id, page=0: asked.append(page) or {
+        "success": True, "leaderboard": {"page": page, "totalPages": 100, "entries": []}}
+    try:
+        harvest.fetch_window(running, 3)
+    finally:
+        osirion.leaderboard_page = real_page
+    check("no field page is read while the window runs", [], asked)
 
     check("a zero-point rank is not stored as a threshold", [1, 3],
           sorted(harvest.thresholds_of([{"rank": 1, "pointsEarned": 40.0},
