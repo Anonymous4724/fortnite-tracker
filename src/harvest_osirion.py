@@ -59,6 +59,12 @@ RANKS = [1, 3, 5, 10, 20, 25, 50, 100, 120, 250, 500, 1000, 2500, 5000, 10000]
 # deepest rank anyone can reach through it is 10,100.
 PAGE_CAP = 101
 PAGE_SIZE = 100
+# A board this many pages long is at the API's ceiling: "ten thousand or
+# more" (see field_of); and how narrow the rosters' percentiles must pin the
+# field, in rosters, to be taken as its size.
+PAGES_CEILING = 100
+FIELD_PIN = 20
+FIELD_CALLS = 7                 # requests at most to find the step, per window
 
 
 # --------------------------------------------------------------------------- #
@@ -196,6 +202,25 @@ def windows_of(events: dict, from_year: int) -> list[dict]:
 def page_path(work: dict, page: int) -> str:
     return raw_path("leaderboards", work["event_id"],
                     f"{slug(work['window_id'])}_p{page:03d}.json.gz")
+
+
+def pages_beyond(work: dict, run: int) -> list[int]:
+    """The pages of this window on disk past the run from page zero: the cuts'
+    pages, and the one or two read to find where the rosters' percentiles
+    step up (see fetch_field_pages)."""
+    folder = os.path.dirname(page_path(work, 0))
+    prefix = slug(work["window_id"]) + "_p"
+    numbers = []
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return []
+    for name in names:
+        if name.startswith(prefix) and name.endswith(".json.gz"):
+            digits = name[len(prefix):-len(".json.gz")]
+            if digits.isdigit() and int(digits) >= run:
+                numbers.append(int(digits))
+    return sorted(numbers)
 
 
 def read_page(work: dict, page: int):
@@ -350,6 +375,50 @@ def fetch_window(work: dict, pages: int) -> int:
             continue
         save(page_path(work, number), saved)
         calls += 1
+    # At the API's ceiling, the page where the percentiles step up, for the
+    # windows of the last RECENT_DAYS: a few requests once, and the field is
+    # known to a few rosters (see field_of). Older ones keep the least the
+    # pages on disk allow.
+    if settled is not None and settled >= PAGES_CEILING and not stale and recent(work):
+        calls += fetch_field_pages(work)
+    return calls
+
+
+def field_page(low: float, high: float) -> int:
+    """The page to read next to find the step: the first tenth whose step can
+    sit inside the ranks the API pages, halfway between where the bounds put
+    it. -1 when none can, a field of more than a hundred thousand. The same
+    search as the live feed's (worker.js, `fieldPage`)."""
+    last = PAGES_CEILING * PAGE_SIZE
+    k = 1
+    while k <= 9 and math.floor(k * low / 10) + 1 > last:
+        k += 1
+    if k > 9:
+        return -1
+    lowest = math.floor(k * low / 10) + 1
+    highest = min(math.ceil(k * high / 10), last) if math.isfinite(high) else last
+    if highest < lowest:
+        return -1
+    return (round((lowest + highest) / 2) - 1) // PAGE_SIZE
+
+
+def fetch_field_pages(work: dict) -> int:
+    """Halve the field's bounds, a page at a time, until a page on disk holds
+    the step: seven requests at most, none once it is found."""
+    calls = 0
+    for _ in range(FIELD_CALLS):
+        bounds = osirion.field_bounds(saved_entries(work, PAGE_CAP))
+        if not bounds or bounds[1] - bounds[0] <= FIELD_PIN:
+            break
+        number = field_page(*bounds)
+        if number < 0 or read_page(work, number) is not None:
+            break
+        try:
+            saved = osirion.leaderboard_page(work["event_id"], work["window_id"], number)
+        except osirion.OsirionError:
+            break
+        save(page_path(work, number), saved)
+        calls += 1
     return calls
 
 
@@ -468,9 +537,13 @@ def saved_entries(work: dict, pages: int) -> list[dict]:
         rows += found
         if not found:
             break
-    for number in cut_pages(work, known_pages(work)):
-        if number <= page:
-            continue
+    # The cuts' pages past the ones read, and whatever sits alone past the
+    # run from page zero - the page where the percentiles step up.
+    run = 0
+    while run < PAGE_CAP and os.path.exists(page_path(work, run)):
+        run += 1
+    extra = {n for n in cut_pages(work, known_pages(work)) if n > page} | set(pages_beyond(work, run))
+    for number in sorted(extra):
         payload = read_page(work, number)
         if payload is not None:
             rows += osirion.entries_of(payload)
@@ -528,7 +601,24 @@ def field_of(work: dict, entries: list[dict]) -> int:
     held = math.ceil(len(entries) / per_page)
     if held >= total:
         return deepest                       # the whole board is on disk
-    return max(deepest, (total - 1) * per_page + per_page // 2)
+    estimate = max(deepest, (total - 1) * per_page + per_page // 2)
+    # At the API's ceiling the page count only says "ten thousand or more".
+    # The rosters' percentiles say how many more (osirion.field_bounds): to a
+    # few rosters where a page on disk holds the step, and otherwise at least
+    # the least they allow - Europe's FNCS Solo qualifier of 28 September,
+    # 57,465 players, read 9,950 here before, and 40,000 from its cut's page.
+    bounds = osirion.field_bounds(entries)
+    if bounds:
+        low, high = bounds
+        # Below the ceiling the page count checks the percentiles, and they
+        # replace its half page of doubt: Oceania's 4,525 read 4,550 here.
+        if high - low <= FIELD_PIN:
+            pinned = round((low + high) / 2)
+            if total >= PAGES_CEILING or (total - 1) * per_page < pinned <= total * per_page:
+                return max(pinned, deepest)
+        if total >= PAGES_CEILING and low > estimate:
+            return math.floor(low)
+    return estimate
 
 
 def stage_of(work: dict) -> str:
@@ -717,14 +807,12 @@ def unify_names(conn, canonical: dict[str, str], former: dict[str, str] | None =
 
 def pages_on_disk(work: dict) -> int:
     """How many pages of this window are on disk: the run from page zero, plus
-    the cuts' pages past it. Cheap - it looks, it does not read."""
+    the pages past it - the cuts', and the one where the percentiles step up.
+    Cheap - it looks, it does not read."""
     count = 0
     while count < PAGE_CAP and os.path.exists(page_path(work, count)):
         count += 1
-    for number in cut_pages(work, None):
-        if number >= count and os.path.exists(page_path(work, number)):
-            count += 1
-    return count
+    return count + len(pages_beyond(work, count))
 
 
 def read_again(work: dict) -> bool:
@@ -822,6 +910,11 @@ def build(work_list: list[dict], pages: int, limit: int | None = None,
                 games = (osirion.match_cap(window)
                          or max((len(osirion._sessions(e)) for e in entries[:200]), default=0))
                 field = field_of(work, entries)
+                # The live feed's own count, where it followed the cup: past
+                # the ceiling it reads the field off the same percentiles, on
+                # the page where they step up, which the harvest may not hold.
+                if comp_id is not None:
+                    field = max(field or 0, db.feed_count(conn, comp_id)) or field
 
                 stage = stage_of(work)
                 family = canonical.get(osirion.series_key(work["event_id"])) or family_of(event)

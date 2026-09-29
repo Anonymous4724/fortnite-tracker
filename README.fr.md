@@ -424,7 +424,9 @@ Dans l'ordre que justifient les chiffres :
    (`pace.depth`), et le peloton qu'il lui faut, c'est le nombre de pages du classement, que
    le flux garde maintenant à chaque relevé. Deux corrections viennent du premier jour des
    qualifications FNCS Solo : au plafond de l'API (9 950 comptés pour dix mille ou plus), aucun
-   rang n'est lu comme la moitié grand public, et dans une qualification FNCS, dont le fond
+   rang n'est lu comme la moitié grand public tant que les centiles d'Epic, que porte chaque
+   joueur, n'ont pas donné le peloton - le flux et la moisson le lisent là où ils changent de
+   dixième (57 465 en Europe ce jour-là, 21 725 en NAC) -, et dans une qualification FNCS, dont le fond
    joue pour la qualification, un rang n'est pas lu plus profond que la tranche 0,1–0,2 — le
    premier cinquième d'une cup ordinaire — d'une table désormais mesurée sur les autres cups
    seulement. Les fourchettes d'une réponse en direct ont leurs

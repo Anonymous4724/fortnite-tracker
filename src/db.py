@@ -1665,6 +1665,15 @@ def all_objectives(conn) -> list[dict]:
 # --------------------------------------------------------------------------- #
 # Competitions imported from the API
 # --------------------------------------------------------------------------- #
+def feed_count(conn, comp_id: int) -> int:
+    """The most rosters the live feed counted on this tournament's board: off
+    its last page, or past the API's ten thousand off Epic's percentiles. 0
+    when the feed never counted it."""
+    row = conn.execute("SELECT MAX(ranked) FROM snapshot WHERE competition_id = ? AND ranked > 0",
+                       (comp_id,)).fetchone()
+    return int(row[0] or 0) if row else 0
+
+
 def find_by_window(conn, event_id: str, window_id: str) -> dict | None:
     row = conn.execute(
         "SELECT * FROM competition WHERE event_id = ? AND window_id = ?",

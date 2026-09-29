@@ -161,6 +161,16 @@ def file_window(conn, window: dict, dry: bool) -> tuple[int, int]:
         return -1, 0
     seen = {str(s["ts"])[:16] for s in db.get_snapshots(conn, comp["id"])}
     filed = skipped = 0
+    # How many played, where the feed counted them: off the board's last
+    # page, or past the API's ten thousand off Epic's percentiles, where the
+    # harvest only has the page count's "ten thousand or more". It raises the
+    # tournament's field, never lowers it: a count taken mid-session is who
+    # had played by then.
+    counted = max((int(r.get("ranked") or 0) for r in window["readings"].values()), default=0)
+    if counted > int(comp.get("field_size") or 0) and not dry:
+        db.update_competition(conn, comp["id"], field_size=counted)
+        print(f"  field     {window.get('name') or ''} ({window.get('region') or '?'}): "
+              f"{int(comp.get('field_size') or 0):,} -> {counted:,}, the feed's count")
     # The settled board stands in for the final at the ranks the harvest did
     # not read - the cut the cup was played for, above all.
     settled = settled_points(window)

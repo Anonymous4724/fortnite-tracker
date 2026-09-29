@@ -587,7 +587,14 @@ for any field of ten thousand or more, so rank / 9,950 only bounds a rank's dept
 the end 9 % under its final from half time to the close; that rank kept within 5 % of the
 top's pace. Only a board that shows its whole field can place a rank in the casual half, so at
 the ceiling the page reads no deeper than the band before, and the table is not measured past
-it. Second, an FNCS qualifier's deep end plays for the cut. At those ranks the share of the
+it - until the field is known, which it now is: every roster carries Epic's percentile, its
+place in the whole field rounded down to the tenth, and where that steps up between two ranks
+the field is ten times the rank over the new tenth, to a few rosters. The step from 0 to 0.1
+sits at a tenth of the field, inside the ten thousand ranks the API pages for any field up to a
+hundred thousand; the feed finds it with a page or two more on each pass, the harvest with a
+few more once per window. That first day, Europe's qualifier had 57,465 players, the NAC's
+21,725 (Osirion's own count, from the games it parses: 21,663), Brazil's 11,415 - and
+Oceania's percentiles stepped at rank 905 for the 4,525 its board held whole. Second, an FNCS qualifier's deep end plays for the cut. At those ranks the share of the
 final against the top 25's went from 0.97 at four tenths of the session to 1.04 at the close —
 the course of the table's 0.1–0.2 band, an ordinary cup's top tenth to fifth, to within 0.025 at
 every tenth — where the band their depth gave, 0.2–0.5, runs to 1.10: a rank of an FNCS

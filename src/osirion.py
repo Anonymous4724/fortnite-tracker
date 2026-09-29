@@ -271,6 +271,34 @@ def _stat(session: dict, name: str, default: int = 0) -> int:
         return default
 
 
+def field_bounds(entries: list[dict]) -> tuple[float, float] | None:
+    """What the rosters' percentiles say about the field: more than `low`
+    rosters and at most `high`, or None when no roster carries one.
+
+    Epic's percentile is a roster's place in the whole field - the rosters
+    past the API's ten thousand included - rounded down to the tenth, so
+    tenth d at rank r means d <= 10 r / N < d + 1. Where it steps up between
+    two ranks the field is pinned to within ten rosters over the tenth: the
+    Oceania FNCS Solo qualifier of 28 September stepped to 0.2 at rank 905 for
+    its 4,525 players, and the Oceania Solo Series Cup's steps at ranks 547,
+    1,094 and 1,640 all gave 5,466. The live feed reads the field the same
+    way (worker.js, `fieldBounds`)."""
+    low, high, rows = 0.0, float("inf"), 0
+    for entry in entries or []:
+        rank, share = entry.get("rank"), entry.get("percentile")
+        try:
+            rank, tenth = int(rank), round(float(share) * 10)
+        except (TypeError, ValueError):
+            continue
+        if rank < 1 or not 0 <= tenth <= 9:
+            continue
+        rows += 1
+        low = max(low, 10 * rank / (tenth + 1))
+        if tenth > 0:
+            high = min(high, 10 * rank / tenth)
+    return (low, high) if rows else None
+
+
 def check_scoring(scoring: dict, entries: list[dict], sample: int = 60) -> float:
     """Share of teams whose published total we can reproduce, to the point.
 

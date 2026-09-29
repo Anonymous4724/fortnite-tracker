@@ -224,6 +224,32 @@ def main() -> int:
     check("a board held whole is not rounded up", 137,
           harvest.field_of(whole, harvest.saved_entries(whole, 2)))
 
+    # Past the API's ceiling the page count says "ten thousand or more"; the
+    # rosters' percentiles - Epic's tenth of the whole field, rounded down -
+    # say how many more, and exactly where they step up.
+    def board_page(work, page, field, total):
+        harvest.save(harvest.page_path(work, page), {"success": True, "leaderboard": {
+            "page": page, "totalPages": total,
+            "entries": [{"rank": r, "pointsEarned": 9.0, "percentile": (10 * r // field) / 10}
+                        for r in range(page * 100 + 1, min(field, page * 100 + 100) + 1)]}})
+    capped = {"event_id": "e3", "window_id": "w3"}
+    for page in (0, 1, 2, 79):
+        board_page(capped, page, 57465, 100)
+    check("at the ceiling, the cut's page alone: the least the field can be", 40000,
+          harvest.field_of(capped, harvest.saved_entries(capped, 3)))
+    board_page(capped, 57, 57465, 100)          # the page where 0 steps up to 0.1
+    check("the page holding the step, read with the rest: the field to a few rosters", 57465,
+          harvest.field_of(capped, harvest.saved_entries(capped, 3)))
+    check("its page is counted on disk, so the window is derived again", 5,
+          harvest.pages_on_disk(capped))
+    below = {"event_id": "e4", "window_id": "w4"}
+    for page in range(10):
+        board_page(below, page, 4525, 46)
+    check("below the ceiling the percentiles replace the page count's half page",
+          True, abs(harvest.field_of(below, harvest.saved_entries(below, 10)) - 4525) <= 5)
+    check("a board whose rosters carry no percentile says nothing", None,
+          osirion.field_bounds([{"rank": 5, "pointsEarned": 3.0}]))
+
     check("a zero-point rank is not stored as a threshold", [1, 3],
           sorted(harvest.thresholds_of([{"rank": 1, "pointsEarned": 40.0},
                                         {"rank": 3, "pointsEarned": 12.0},

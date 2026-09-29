@@ -395,7 +395,9 @@ In the order the numbers justify:
    That ratio is measured per band of rank / field on the feed's evenings (`pace.depth`), and
    the field it needs is the board's own page count, which the feed keeps with every reading
    now. Two corrections come from the first day of the FNCS Solo qualifiers: at the API's
-   ceiling (9,950 counted for ten thousand or more) no rank is read as the casual half, and
+   ceiling (9,950 counted for ten thousand or more) no rank is read as the casual half until
+   Epic's percentiles, which every roster carries, have given the field - the feed and the
+   harvest both read it where they step up (57,465 in Europe that day, 21,725 in NAC) - and
    in an FNCS qualifier, whose deep end plays for the cut, a rank is read no deeper than the
    0.1–0.2 band — an ordinary cup's top fifth — of a table now measured on the other cups
    only. The ranges of a live answer have their own multipliers (`pace.live_bands`), measured
