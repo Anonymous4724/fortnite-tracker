@@ -14,8 +14,8 @@ Quatre lanceurs à la racine font tout le quotidien ; le reste est dans `src/` :
 
 | | |
 |---|---|
-| `update.bat` | tout — une passe de moisson pour les nouveaux tournois, le modèle rebâti et vérifié, le calendrier de la semaine, la page, le push ; dix minutes |
-| `site.bat` | la page et le calendrier de la semaine seulement ; quelques secondes |
+| `update.bat` | tout — une passe de moisson pour les nouveaux tournois, le modèle rebâti et vérifié, le calendrier de la semaine, la page, le push des deux dépôts (celui du site et celui-ci) ; dix minutes |
+| `site.bat` | la page et le calendrier de la semaine seulement, et le même push ; quelques secondes |
 | `harvest.bat` | le long téléchargement des tournois passés, une nuit |
 | `tracker.bat` | l'app locale de suivi |
 
@@ -422,7 +422,12 @@ Dans l'ordre que justifient les chiffres :
    est fini au dernier cinquième de la session, le millième de dix mille garde le rythme du
    haut. Ce rapport est mesuré par tranche de rang / peloton sur les soirées du flux
    (`pace.depth`), et le peloton qu'il lui faut, c'est le nombre de pages du classement, que
-   le flux garde maintenant à chaque relevé. Les fourchettes d'une réponse en direct ont leurs
+   le flux garde maintenant à chaque relevé. Deux corrections viennent du premier jour des
+   qualifications FNCS Solo : au plafond de l'API (9 950 comptés pour dix mille ou plus), aucun
+   rang n'est lu comme la moitié grand public, et dans une qualification FNCS, dont le fond
+   joue pour la qualification, un rang n'est pas lu plus profond que la tranche 0,1–0,2 — le
+   premier cinquième d'une cup ordinaire — d'une table désormais mesurée sur les autres cups
+   seulement. Les fourchettes d'une réponse en direct ont leurs
    propres multiplicateurs (`pace.live_bands`), mesurés sur les mêmes soirées. Backtest
    glissant sur 110 soirées : erreur médiane 5,0 → 4,2 % entre trois et cinq dixièmes de la
    session, 4,7 → 3,6 % entre cinq et sept, 2,1 → 1,4 % dans les dix minutes après la clôture.

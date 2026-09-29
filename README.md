@@ -13,8 +13,8 @@ Four launchers at the root are the whole day-to-day; everything else is in `src/
 
 | | |
 |---|---|
-| `update.bat` | everything — a harvest pass for the new tournaments, the model rebuilt and verified, the week's calendar, the page, the push; ten minutes |
-| `site.bat` | the page and the week's calendar only; seconds |
+| `update.bat` | everything — a harvest pass for the new tournaments, the model rebuilt and verified, the week's calendar, the page, the push of both repositories (the site's and this one); ten minutes |
+| `site.bat` | the page and the week's calendar only, and the same push; seconds |
 | `harvest.bat` | the long download of past tournaments, a night |
 | `tracker.bat` | the local tracker app |
 
@@ -394,7 +394,11 @@ In the order the numbers justify:
    done by the last fifth of the session, the thousandth of ten thousand keeps the top's pace.
    That ratio is measured per band of rank / field on the feed's evenings (`pace.depth`), and
    the field it needs is the board's own page count, which the feed keeps with every reading
-   now. The ranges of a live answer have their own multipliers (`pace.live_bands`), measured
+   now. Two corrections come from the first day of the FNCS Solo qualifiers: at the API's
+   ceiling (9,950 counted for ten thousand or more) no rank is read as the casual half, and
+   in an FNCS qualifier, whose deep end plays for the cut, a rank is read no deeper than the
+   0.1–0.2 band — an ordinary cup's top fifth — of a table now measured on the other cups
+   only. The ranges of a live answer have their own multipliers (`pace.live_bands`), measured
    on the same evenings. Rolling backtest on 110 evenings: median error 5.0 → 4.2 % at three
    to five tenths of the session, 4.7 → 3.6 % at five to seven, 2.1 → 1.4 % in the ten minutes
    after the close. See `docs/methodology.md`, "The pace of a kind of cup".

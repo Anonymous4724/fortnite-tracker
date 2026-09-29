@@ -189,6 +189,32 @@ DEPTH_STEPS = tuple(round(0.1 * i, 1) for i in range(1, 11))
 DEPTH_MIN = 15                           # evenings a band's tenth needs before it ships
 LATE_MINUTES = 20                        # a feed reading this long past the close stands in for a final
 
+# Two cases the table does not describe, met on the first day of the FNCS
+# Solo qualifiers (28 September 2026, seven regions, read deep: at the cut
+# in five regions, the 2,000th to the 8,000th, and at the 1,000th in Oceania
+# and Asia). The page reads both the same way (DEPTH_CEILING_Q, DEPTH_FNCS_Q
+# there).
+#   A board at the API's ceiling counts 9,950 for any field of ten thousand
+#   or more, so rank / 9,950 only bounds a rank's depth. The last band is the
+#   casual half of a field, and only a board that shows its whole field can
+#   place a rank in it: at the ceiling the page reads no deeper than the band
+#   before, and the table is not measured past it. Europe's 8,000th read as
+#   0.8 of 9,950 and kept within 5 % of the top's pace, where the casual
+#   half's ratio put the reading carried to the end 9 % under its final.
+#   An FNCS qualifier's deep end plays for the cut. At those ranks the share
+#   of the final against the top 25's went from 0.97 at four tenths of the
+#   session to 1.04 at the close - the course of the 0.1-0.2 band, an
+#   ordinary cup's top tenth to fifth, to within 0.025 at every tenth - where
+#   the band their depth gave, 0.2-0.5, runs to 1.10. Carried to the end on
+#   the qualifier's own curve, the readings ran 4.3 % under their final with
+#   the table and 0.4 % under with that band (1.8 % off on average). So the
+#   table is measured on the other cups, an FNCS qualifier's rank is read no
+#   deeper than that band, and past the close it carries the lead it had at
+#   the buzzer into the games still landing, until its board is whole.
+FIELD_CEILING = 9950
+DEPTH_CEILING_Q = 0.49
+DEPTH_FNCS_Q = 0.19
+
 # The page reads a family's curve from FAMILY_FROM on and a depth ratio from
 # DEPTH_FROM on, each ramping in over the tenth before: earlier the board
 # holds a game or two, the curves are a few hundredths apart, the ratio
@@ -573,14 +599,25 @@ def depth_band(q: float):
     return None
 
 
+def fncs_qualifier(comp: dict) -> bool:
+    """An FNCS qualifier - "FNCS Solos Qualifiers" and its later rounds - and
+    not the skin, icon and practice cups that carry FNCS in their name: those
+    are open cups like any other. The page's `fncsQualifier`."""
+    name = str(comp.get("name") or "").lower()
+    return "fncs" in name and "qualifier" in name
+
+
 def depth_tables(evenings: list) -> list:
     """[[low, high, {tenth: ratio}, evenings], ...]: the share of the final
     the ranks of a band of q = rank / field have reached over the top 25's at
-    the same tenth, median over the evenings the feed followed."""
+    the same tenth, median over the evenings the feed followed - the other
+    cups' evenings: an FNCS qualifier reads its 0.1-0.2 band (DEPTH_FNCS_Q). On
+    a field at the ceiling a rank past DEPTH_CEILING_Q is not placed in a
+    band: its depth is not known."""
     per = collections.defaultdict(lambda: collections.defaultdict(list))   # (band, step) -> evening -> ratios
     for i, ev in enumerate(evenings):
         field = ev["comp"].get("field_size") or 0
-        if field <= 0:
+        if field <= 0 or fncs_qualifier(ev["comp"]):
             continue
         top = collections.defaultdict(list)
         deep = collections.defaultdict(lambda: collections.defaultdict(list))
@@ -596,7 +633,7 @@ def depth_tables(evenings: list) -> list:
                     continue
                 if rank <= 25:
                     top[step].append(p / final)
-                else:
+                elif field < FIELD_CEILING or rank / field < DEPTH_CEILING_Q:
                     band = depth_band(rank / field)
                     if band:
                         deep[band][step].append(p / final)
@@ -634,12 +671,35 @@ def depth_row(rows: list, q: float):
     return None
 
 
+def depth_ratio(comp: dict, rank: int, share: float, depth: list) -> float:
+    """The depth ratio the page applies to a rank at a share of the session:
+    the band's, ramped in over the tenth before DEPTH_FROM, read no deeper
+    than DEPTH_CEILING_Q on a field at the ceiling, and no deeper than
+    DEPTH_FNCS_Q in an FNCS qualifier. Mirrors `depthFor` in the page."""
+    field = comp.get("field_size") or 0
+    if field <= 0 or not rank or rank < 1:
+        return 1.0
+    q = rank / field
+    if field >= FIELD_CEILING:
+        q = min(q, DEPTH_CEILING_Q)
+    if fncs_qualifier(comp):
+        q = min(q, DEPTH_FNCS_Q)
+    row = depth_row(depth or [], q)
+    if not row or share < DEPTH_FROM - 0.1:
+        return 1.0
+    d = interp(row[2], share, below_linear=False) or 1.0
+    if share < DEPTH_FROM:
+        d = 1 + (d - 1) * max(0.0, (share - (DEPTH_FROM - 0.1)) / 0.1)
+    return d
+
+
 def expected_share(comp: dict, rank: int, share: float, after: float, pooled: dict,
                    families: list, categories: list, depth: list) -> float:
     """What the page expects a rank's board to have reached: the category's
     curve, else the family's, else the pooled one, ramped in from FAMILY_FROM;
-    times the band's depth ratio from DEPTH_FROM; the matching tail past the
-    close. Mirrors `expectedAt` in the page, table for table."""
+    times the rank's depth ratio (`depth_ratio`); the matching tail past the
+    close - in an FNCS qualifier times the ratio at the buzzer, up to the
+    whole board. Mirrors `expectedAt` in the page, table for table."""
     kin = None
     name = category_key(comp.get("name"))
     mode, team, minutes, games = family_key(comp)
@@ -673,6 +733,8 @@ def expected_share(comp: dict, rank: int, share: float, after: float, pooled: di
             banded = band_row(pooled.get("tail_by_rank") or [], rank)
             tail = banded[2] if banded else pooled.get("tail") or {}
         t = interp(tail, after, below_linear=False)
+        if t is not None and fncs_qualifier(comp):
+            t = min(1.0, t * depth_ratio(comp, rank, 1.0, depth))
         return max(t, 0.05) if t is not None else 1.0
     base = interp(pooled.get("curve") or {}, share)
     m = interp((kin or {}).get("curve") or {}, share) if kin else None
@@ -681,13 +743,7 @@ def expected_share(comp: dict, rank: int, share: float, after: float, pooled: di
     elif share < FAMILY_FROM and base is not None:
         f = max(0.0, (share - (FAMILY_FROM - 0.1)) / 0.1)
         m = base * (1 - f) + m * f
-    field = comp.get("field_size") or 0
-    row = depth_row(depth or [], rank / field) if field > 0 else None
-    if row and share >= DEPTH_FROM - 0.1:
-        d = interp(row[2], share, below_linear=False) or 1.0
-        if share < DEPTH_FROM:
-            d = 1 + (d - 1) * max(0.0, (share - (DEPTH_FROM - 0.1)) / 0.1)
-        m *= d
+    m *= depth_ratio(comp, rank, share, depth)
     return max(m, 0.05)
 
 

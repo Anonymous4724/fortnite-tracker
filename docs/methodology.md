@@ -578,6 +578,31 @@ reading. It is: the depth of a rank is measured against it, the size of the fiel
 cold forecast is most often wrong about, and the arrival itself — when the field fills — is a
 clock the pace curve may be told by, once enough evenings carry the count to measure it.
 
+**Two cases the table does not describe.** Both came up on the first day of the FNCS Solo
+qualifiers (28 September, seven regions), whose cut sits deep in the field — the 8,000th in
+Europe, the 4,000th in North America Central, the 2,000th elsewhere — and which the feed read
+at the cut all evening in five regions, and at the 1,000th in Oceania and Asia. First, the ceiling: a board at the API's hundredth page counts 9,950
+for any field of ten thousand or more, so rank / 9,950 only bounds a rank's depth. Europe's
+8,000th read as 0.8 of 9,950, the casual half's band, whose ratio put the reading carried to
+the end 9 % under its final from half time to the close; that rank kept within 5 % of the
+top's pace. Only a board that shows its whole field can place a rank in the casual half, so at
+the ceiling the page reads no deeper than the band before, and the table is not measured past
+it. Second, an FNCS qualifier's deep end plays for the cut. At those ranks the share of the
+final against the top 25's went from 0.97 at four tenths of the session to 1.04 at the close —
+the course of the table's 0.1–0.2 band, an ordinary cup's top tenth to fifth, to within 0.025 at
+every tenth — where the band their depth gave, 0.2–0.5, runs to 1.10: a rank of an FNCS
+qualifier is read no deeper than that band. Carried to the end on the qualifier's own curve
+(each region against the other six's top 25), the readings ran 4.3 % under their final on
+average from four tenths of the session on with the table, 0.4 % under with the band, 1.8 %
+off on average (0.7 to 1.5 % in five regions; 3.1 % over in the Middle East and 4.4 % under in
+Asia, whose 1,000th already sat in that band). On the family's curve, which runs behind a
+qualifier's top mid-session, the table left them 2.6 % under and the band 1.4 % over. Past the
+close the deep end carries the lead it had at the buzzer into the games still landing, until
+its board is whole: without that the answer jumped at the close and ran 2 to 3 % high for the
+next ten minutes. The table is now measured on the other cups only, and the rule is read for
+FNCS qualifiers — not for the skin, icon and practice cups that carry FNCS in their name. Seven
+evenings are few; the second day of the same qualifiers is the first check.
+
 **How wide a live answer has to be.** The multipliers that turn a half-width into a range were
 measured on cold forecasts and applied to live ones, and the live 50 % range held a quarter of
 the finals mid-session where it claimed half. They are now measured on the feed's evenings too,

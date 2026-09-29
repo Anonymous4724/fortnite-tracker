@@ -19,7 +19,9 @@ command the day-to-day needs:
                         each cup priced by the model just exported
     build               index.html + model.js + calendar.js, standalone.html,
                         and the site's pages (the week, the guides, the method)
-    git (--publish)     commit the predictor and push, so the site updates
+    git (--publish)     commit the predictor and push, so the site updates -
+                        and this repository's own changes with it, so its
+                        public copy is the code that runs here
 
     python src/refresh.py                 everything above, no push
     python src/refresh.py --publish       and push the predictor repository
@@ -62,6 +64,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -175,6 +178,64 @@ def untrack_ignored(repo: Path, dry: bool = False) -> None:
         subprocess.run(["git", "rm", "--cached", "-q", "--", *files], cwd=str(repo))
 
 
+# What a run publishes of this repository besides what git already follows:
+# new code and documentation, where code and documentation live. Nothing that
+# looks like data, a key or a local note is ever added, whatever .gitignore
+# says about it - and data/ is ignored on top of that.
+NEW_FILES = re.compile(r"^(?:src/[^/]+\.(?:py|bat|sh)|analysis/[^/]+\.py|docs/[^/]+\.md|[^/]+\.(?:md|bat))$")
+NEVER = re.compile(r"(?:^|/)data/|key|cle_|secret|token|password|\.env$|\.db$|\.sqlite|\.local\.", re.I)
+# The tables a run rewrites: a commit of these alone is a model refresh.
+DERIVED = {"model.json", "analysis/pace.json", "analysis/validation.json", "analysis/blend.json"}
+
+
+def publish_tracker(label, dry: bool = False) -> bool:
+    """Commit and push this repository - its code, its documentation and the
+    tables a run rewrites - the way the predictor is published, so the public
+    copy is the one that runs here without a git command typed by hand. What
+    git already follows is taken as it is; a new file only when it is code or
+    documentation where those live. A push GitHub refuses is said and left
+    for the next run: the site itself is already published by then."""
+    if not (ROOT / ".git").exists():
+        print("\n  (this folder is not a git repository: its own code is not published)")
+        return True
+    def git(*args):
+        return subprocess.run(["git", *args], cwd=str(ROOT), capture_output=True, text=True)
+    untrack_ignored(ROOT, dry=dry)
+    new = [path.strip() for path in git("ls-files", "--others", "--exclude-standard").stdout.splitlines()
+           if NEW_FILES.match(path.strip()) and not NEVER.search(path.strip())]
+    if dry:
+        changed = [line for line in git("status", "--porcelain", "--untracked-files=no").stdout.splitlines() if line.strip()]
+        print(f"\n{label('Publish this repository')}\n  {len(changed)} changed file(s), new: {new or 'none'}")
+        return True
+    git("add", "-u")
+    if new:
+        git("add", "--", *new)
+    staged = [line.strip() for line in git("diff", "--cached", "--name-only").stdout.splitlines() if line.strip()]
+    print(f"\n{label('Publish this repository')}")
+    if staged:
+        stamp = date.today().isoformat()
+        message = f"Model refresh {stamp}" if set(staged) <= DERIVED else f"Code update {stamp}"
+        print(f"  {message}: " + ", ".join(staged))
+        if git("commit", "-q", "-m", message).returncode:
+            print("  git commit failed: nothing of this repository was published")
+            return False
+    # A commit an earlier run could not push is still owed, and goes now.
+    ahead = git("rev-list", "--count", "@{u}..HEAD")
+    if ahead.returncode == 0 and ahead.stdout.strip() == "0":
+        print("  nothing changed since the last publish")
+        return True
+    for command in (["pull", "--rebase", "--autostash", "--quiet"], ["push", "--quiet"]):
+        # Not captured: a push may need the credential helper's window once.
+        if subprocess.run(["git", *command], cwd=str(ROOT)).returncode:
+            if command[0] == "pull":
+                subprocess.run(["git", "rebase", "--abort"], cwd=str(ROOT), capture_output=True)
+            print(f"  git {command[0]} failed: committed here, not pushed. The site is published "
+                  "all the same, and the next run pushes what is owed.")
+            return False
+    print("  pushed")
+    return True
+
+
 def summarise(model_path: Path) -> str:
     if not model_path.exists():
         return "no model yet"
@@ -194,7 +255,7 @@ def main() -> int:
     parser.add_argument("--fetch", action="store_true",
                         help="run a shallow harvest pass first, for new windows")
     parser.add_argument("--publish", action="store_true",
-                        help="commit and push the predictor repository afterwards")
+                        help="commit and push the predictor repository afterwards, and this one's own changes")
     parser.add_argument("--page", action="store_true",
                         help="the page and the calendar alone: no harvest, no model, no feed")
     parser.add_argument("--pace", action="store_true",
@@ -329,6 +390,8 @@ def main() -> int:
                     print("\n  GitHub has changes this folder could not take in by itself.")
                     print("  Run `git status` in the predictor folder and settle them, then run this again.")
                 return 1
+        # This repository's own changes, the same way, once the site is out.
+        publish_tracker(label, dry=args.dry_run)
 
     print(f"\nafter     : {summarise(predictor / 'model.json')}")
     if not args.publish:
