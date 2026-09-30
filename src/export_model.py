@@ -536,6 +536,65 @@ def measured_blend() -> dict | None:
     return {k: found.get(k) for k in ("generated", "evenings", "reading", "cold") if k in found}
 
 
+# "...Qual1Round1Day2_EU": the day of a round played over several days - one
+# window a day, the cut ranked on the total - as Epic's window id numbers it.
+DAY_OF_ROUND = re.compile(r"Day(\d+)")
+
+
+def later_day(window_id) -> bool:
+    """Is this window the second day of a round, or a later one?"""
+    found = DAY_OF_ROUND.search(str(window_id or ""))
+    return bool(found) and int(found.group(1)) >= 2
+
+
+def later_day_shifts(comps: list[dict]) -> dict | None:
+    """How a later day of a round moves the day before's thresholds, per band
+    of rank: {"days": later days measured, "bands": {band: [shift, spread,
+    readings]}}, None when no round has been harvested day by day yet.
+
+    The page prices a later day off the day before, its previous edition, and
+    the day before is not the same field: players out of the running after
+    it do not come back. The FNCS Solo qualifiers' second day of 29 September
+    drew 14 to 21 % fewer players than the first, region by region, and the
+    list was 4 to 9 % high at the cut. Those who stay away come from the
+    bottom of the board, so its top hardly moves and its deep end drops - by
+    less than the curve says of a field that shrinks as a whole: 8 % at
+    Oceania's cut, where the curve says 12. So the move is measured, as a turn
+    of season's is (calibration.season_shifts): each later day against the
+    day before it, at every rank both hold, the median log-move per band of
+    rank, and the 80th percentile of the distance from it as the spread.
+    """
+    by_window = {(c.get("event_id"), c.get("window_id")): c for c in comps
+                 if c.get("event_id") and c.get("window_id")}
+    moves, days = {}, 0
+    for (event, window), comp in by_window.items():
+        found = DAY_OF_ROUND.search(window)
+        if not found or int(found.group(1)) < 2:
+            continue
+        prior = by_window.get((event, f"{window[:found.start(1)]}{int(found.group(1)) - 1}{window[found.end(1):]}"))
+        ref_a = predict.final_value(prior, calibration.REFERENCE_RANK) if prior else None
+        ref_b = predict.final_value(comp, calibration.REFERENCE_RANK)
+        if not ref_a or not ref_b:
+            continue
+        read = False
+        for rank in set(prior.get("ranks") or ()) & set(comp.get("ranks") or ()):
+            va, vb = predict.final_value(prior, int(rank)), predict.final_value(comp, int(rank))
+            if not va or not vb or va < calibration.SEASON_FLOOR * ref_a or vb < calibration.SEASON_FLOOR * ref_b:
+                continue
+            moves.setdefault(calibration.season_band(int(rank)), []).append(math.log(vb / va))
+            read = True
+        days += read
+    if not moves:
+        return None
+    bands = {}
+    for band, values in moves.items():
+        n = len(values)
+        shift = statistics.median(values)
+        gaps = sorted(abs(v - shift) for v in values)
+        bands[band] = [round(shift, 4), round(max(gaps[min(n - 1, int(0.8 * n))], calibration.SHAPE_FLOOR), 4), n]
+    return {"days": days, "bands": bands}
+
+
 def build_model(conn, comps: list[dict], calib: dict) -> dict:
     thresholds = conn.execute("SELECT COUNT(*) FROM final_result").fetchone()[0]
     a, b = calib["curve"]
@@ -595,6 +654,10 @@ def build_model(conn, comps: list[dict], calib: dict) -> dict:
         "quality": measured_quality(),
         "pace": measured_pace(),
         "blend": measured_blend(),
+        # How a later day of a round moves the day before's thresholds, per
+        # band of rank: {"days": n, "bands": {band: [shift, spread, readings]}}.
+        # See later_day_shifts.
+        "later_day": later_day_shifts(comps),
     }
     ENTRY_BARS.clear()
     model.update(build_tables(comps, calib))
@@ -1055,6 +1118,13 @@ def predict_from_model(model: dict, tournament: dict) -> dict | None:
             return {"ok": False, "reason": FIELD_BELOW_CUT}
     if rank < 1:
         return None
+    # A later day of a round played over several days reads the day before as
+    # its previous edition, and draws fewer players: with no field typed, the
+    # reading is moved by what the later days measured so far did at this
+    # band of rank, and its band widened by their spread (`later_day`, see
+    # later_day_shifts). A field typed in moves it along the curve instead.
+    later = ((model.get("later_day") or {}).get("bands") or {}).get(season_band(rank)) \
+        if guessed and tournament.get("later_day") else None
 
     # Rung zero, the port of calibration.direct_from: this cup, this region,
     # this format, this rank, last time.
@@ -1110,6 +1180,10 @@ def predict_from_model(model: dict, tournament: dict) -> dict | None:
             value *= math.exp(move)
             rel = math.sqrt(rel ** 2 + (model["field_move"]["rel"] * move) ** 2)
             effect = 100 * (math.exp(move) - 1)
+        elif later:
+            value *= math.exp(float(later[0]))
+            rel = math.sqrt(rel ** 2 + float(later[1]) ** 2)
+            effect = 100 * (math.exp(float(later[0])) - 1)
         # Read across a turn of season, the value moves.
         shift, moved, pairs = season_move(model, since, until, rank)
         season = {"effect": 0.0, "pairs": 0, "since": None, "until": None, "date": date}
@@ -1158,7 +1232,9 @@ def predict_from_model(model: dict, tournament: dict) -> dict | None:
                 "field_effect": round(effect, 1), "entry_note": note,
                 "edition": season["date"], "season_effect": round(season["effect"], 1),
                 "season_pairs": season["pairs"], "season_from": season["since"], "season_to": season["until"],
-                "level": round(value, 1), "ref_rank": rank}
+                "level": round(value, 1), "ref_rank": rank,
+                # The readings the later-day move rests on, 0 when none was made.
+                "later_day": int(later[2]) if later else 0}
 
     # The last places of a single lobby: teams that left, not a threshold.
     if single_lobby(model, tournament, field) and rank / field > model["lobby_rule"]["last"]:
@@ -1384,6 +1460,9 @@ def calendar_tournament(model: dict, row: dict, scorings: list) -> dict | None:
         "season": model.get("season") if season is None else season,
         "scoring_known": True,
         "single_lobby": bool(closed),
+        # The second day of a round or a later one, the port of the page's
+        # laterDay: see later_day_shifts.
+        "later_day": later_day(row.get("window")),
     }
 
 

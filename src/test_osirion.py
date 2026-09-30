@@ -800,6 +800,71 @@ def main() -> int:
         export_model.DB_PATH, sys.argv = saved_path, saved_argv
     check("an export that checked no forecast is not written", (1, False), (code, os.path.exists(out)))
 
+    print("\n16. A later day of a round: the day before, moved as the later days moved")
+    # A qualifier whose first round is played over two days, in two regions:
+    # its first round measured whole, its second with the first day played and
+    # the second on the calendar. On the second day the top of the board keeps
+    # its level, ranks 101 to 500 lose 2 % and the deep end 5 %.
+    import math
+    two_days = os.path.join(workdir, "days.db")
+    db.init_db(two_days)
+    plan = {"placement": [[1, 1, 60], [2, 5, 40], [6, 25, 20], [26, 100, 5]], "kill": 2.0}
+    first_day = {1: 400.0, 5: 380.0, 10: 360.0, 20: 340.0, 25: 320.0, 50: 300.0, 100: 280.0,
+                 250: 260.0, 500: 240.0, 1000: 200.0, 2000: 180.0}
+    second_day = {r: v * (1.0 if r <= 100 else 0.98 if r <= 500 else 0.95) for r, v in first_day.items()}
+    with db.session(two_days) as conn:
+        for region in ("EU", "NAC"):
+            for qual, days in (("Qual1", ("2026-07-06", "2026-07-07")), ("Qual2", ("2026-07-13",))):
+                for n, date in enumerate(days, 1):
+                    cid = db.create_competition(conn, f"Test Qualifiers {region} {qual} {n}", region=region,
+                                                team_mode="Solo", game_mode="Battle Royale",
+                                                start_time=f"{date} 18:00", end_time=f"{date} 21:00",
+                                                ranks=sorted(first_day), max_games=10, scoring=plan)
+                    db.update_competition(conn, cid, family="Test Qualifiers", field_size=5000,
+                                          finished_at=f"{date} 21:00", event_id=f"epicgames_S42_TestQuals_{region}",
+                                          window_id=f"S42_TestQuals_{qual}Round1Day{n}_{region}")
+                    db.set_finals(conn, cid, second_day if n == 2 else first_day)
+        comps = export_model.load_competitions(conn)
+        calib = export_model.calibration_of(comps)
+        model = export_model.build_model(conn, comps, calib)
+        check("the export still reproduces the model it was built from", 0,
+              len(export_model.verify(model, comps, calib)["mismatches"]))
+    check("the export measures the later days per band of rank",
+          {"days": 2, "bands": {"100": [0.0, 0.02, 14], "500": [-0.0202, 0.02, 4], "0": [-0.0513, 0.02, 4]}},
+          model.get("later_day"))
+    check("a window is a later day from its id's Day 2 on",
+          [True, True, False, False, False],
+          [export_model.later_day(w) for w in ("S42_TestQuals_Qual2Round1Day2_EU", "S42_X_Round1Day3_NAC",
+                                               "S42_TestQuals_Qual2Round1Day1_EU", "S42_HolidayCup_Event1_EU", None)])
+    row = {"kind": "Test Qualifiers", "name": "Test Qualifiers", "event": "epicgames_S42_TestQuals_EU",
+           "window": "S42_TestQuals_Qual2Round1Day2_EU", "stage": 0, "region": "EU", "team": "Solo",
+           "mode": "Battle Royale", "games": 10, "begin": "2026-07-14T18:00Z", "end": "2026-07-14T21:00Z",
+           "tiers": [["q", 1000, "Test Qual 2 Round 2", 2]], "entry": "", "field": 0, "scoring": 0}
+    base = export_model.category_row(model, {"category": "Test Qualifiers", "region": "EU", "team_mode": "Solo",
+                                             "game_mode": "Battle Royale"})["direct"]
+
+    def listed(model_, row_):
+        return [[r, v] for r, v, _, _ in export_model.calendar_forecast(model_, row_, [plan])["ranks"]]
+
+    check("the second day is the day before, moved by its band's measured move",
+          [[100, round(base["100"][0], 1)], [1000, round(base["1000"][0] * math.exp(-0.0513), 1)]],
+          listed(model, row))
+    t = export_model.calendar_tournament(model, row, [plan])
+    moved = export_model.predict_from_model(model, dict(t, rank=1000))
+    plain = export_model.predict_from_model(dict(model, later_day=None), dict(t, rank=1000))
+    check("its band widened by the move's spread, and the readings behind it said",
+          (True, 4, "previous edition"),
+          (moved["high"] / moved["value"] > plain["high"] / plain["value"], moved["later_day"], moved["source"]))
+    check("the first day of a round is not moved",
+          [[100, round(base["100"][0], 1)], [1000, round(base["1000"][0], 1)]],
+          listed(model, dict(row, window="S42_TestQuals_Qual2Round1Day1_EU")))
+    check("nor is a later day in a model that measured none",
+          [[100, round(base["100"][0], 1)], [1000, round(base["1000"][0], 1)]],
+          listed(dict(model, later_day=None), row))
+    typed = export_model.predict_from_model(model, dict(t, rank=1000, field_size=4000))
+    check("a field typed in moves the day before along the curve instead", (0, True),
+          (typed["later_day"], typed["field_effect"] < 0))
+
     print("\n" + "=" * 68)
     if FAILURES:
         print(f"  {len(FAILURES)} failure(s):")
