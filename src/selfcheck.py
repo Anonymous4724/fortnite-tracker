@@ -91,7 +91,7 @@ check("cleanup.py --list offers only caches and interrupted downloads",
       all(o.endswith(("__pycache__", ".part")) for o in offered), str(offered))
 
 print("\n5. the research layer")
-for mod in ("data", "fit", "diagnostics", "validate", "anchor", "shape", "blend", "coldbench"):
+for mod in ("data", "fit", "diagnostics", "validate", "anchor", "shape", "blend", "coldbench", "bench"):
     code, out = run(f'"{PY}" -m analysis.{mod}', timeout=900, cwd=ROOT)
     check(f"analysis.{mod}", code == 0, out.strip()[-120:] if code else "")
 

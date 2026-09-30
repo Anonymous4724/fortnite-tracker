@@ -865,6 +865,289 @@ def main() -> int:
     check("a field typed in moves the day before along the curve instead", (0, True),
           (typed["later_day"], typed["field_effect"] < 0))
 
+    print("\n17. The cold bench: every cup priced from the model online before it")
+    import importlib.util
+    if any(importlib.util.find_spec(p) is None for p in ("numpy", "pandas", "scipy")):
+        print("   (skipped: analysis/ needs its own requirements, see analysis/requirements.txt)")
+    else:
+        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        import gzip
+        import calendar_snapshot
+        import rescore
+        from analysis import bench
+        bench_db = os.path.join(workdir, "bench.db")
+        db.init_db(bench_db)
+        # A duo cup the list carries, its row rebuilt from the catalogue: its
+        # window pays out to the top 100, who go through to a second round.
+        listed = calendar_snapshot.entry(EVENT, CUMULATIVE_WINDOW, "EU")
+        duo = {"placement": [[1, 1, 60], [2, 2, 54], [3, 3, 48]], "kill": 2.0}
+        base = {r: round(300 * (r / 20) ** -0.3, 1) for r in (1, 10, 20, 25, 50, 100, 250, 500, 1000, 2500)}
+
+        def edition(conn, family, region, day, scale, team="Solo", mode="Battle Royale", games=10,
+                    scoring=table, event="", window="", hour=18):
+            cid = db.create_competition(conn, f"{family} {region} {day}", region=region, team_mode=team,
+                                        game_mode=mode, start_time=f"{day} {hour:02d}:00",
+                                        end_time=f"{day} {hour + 3:02d}:00",
+                                        ranks=sorted(base), max_games=games, scoring=scoring)
+            db.update_competition(conn, cid, family=family, field_size=3000, finished_at=f"{day} {hour + 3:02d}:00",
+                                  event_id=event, window_id=window)
+            db.set_finals(conn, cid, {r: round(v * scale, 1) for r, v in base.items()})
+
+        with db.session(bench_db) as conn:
+            # Its third edition doubles: a forecast that read it would say so.
+            for day, scale in (("2026-07-06", 1.0), ("2026-07-13", 1.05), ("2026-07-20", 2.0)):
+                edition(conn, "Bench Cup", "EU", day, scale)
+            for day in ("2026-07-20", "2026-07-27"):
+                edition(conn, "Bench Cup", "NAC", day, 0.8)
+            # A cup played first in Asia in the morning, then in Europe that evening.
+            edition(conn, "Morning Cup", "ASIA", "2026-07-20", 0.9, hour=8)
+            edition(conn, "Morning Cup", "EU", "2026-07-20", 1.0)
+            # Its scoring only assumed: the page could not open it.
+            edition(conn, "Blind Cup", "EU", "2026-07-13", 1.0, scoring=None)
+            listed_window = CUMULATIVE_WINDOW["eventWindowId"]
+            for day, scale, window in (("2026-07-06", 1.0, ""), ("2026-07-13", 1.1, listed_window)):
+                edition(conn, listed["kind"], "EU", day, scale, team=listed["team"], mode=listed["mode"],
+                        games=listed["games"], scoring=duo, event=EVENT["eventId"] if window else "", window=window)
+        folder = os.path.join(workdir, "catalogue")
+        os.makedirs(folder, exist_ok=True)
+        with gzip.open(os.path.join(folder, "EU.json.gz"), "wt", encoding="utf-8") as fh:
+            json.dump([EVENT], fh)
+        catalogue = bench.load_catalogue(folder)
+        check("the catalogue gives the list's windows back, each with its region",
+              [(EVENT["eventId"], CUMULATIVE_WINDOW["eventWindowId"], "EU")],
+              [(e, w, found[2]) for (e, w), found in catalogue.items()])
+
+        key = bench.model_key(bench_db)
+        with db.session(bench_db) as conn:
+            ours = bench.Models(conn, export_model.load_competitions(conn), key, None).get("2026-07-20")
+        out = os.path.join(workdir, "before.json")
+        saved_path, saved_argv = export_model.DB_PATH, sys.argv
+        export_model.DB_PATH, sys.argv = Path(bench_db), ["export_model.py", "--before", "2026-07-20", "--out", out]
+        try:
+            quiet = io.StringIO()
+            with contextlib.redirect_stdout(quiet), contextlib.redirect_stderr(quiet):
+                code = export_model.main()
+        finally:
+            export_model.DB_PATH, sys.argv = saved_path, saved_argv
+        with open(out, encoding="utf-8") as fh:
+            check("the bench's model of a day is the one export_model.py --before writes",
+                  (0, True), (code, json.load(fh) == ours))
+
+        with db.session(bench_db) as conn:
+            asked = ("Bench Cup", "NAC", "Solo", "Battle Royale")
+            check("a cup is new in its region until its first edition is over, whatever the database holds since",
+                  (True, False, True),
+                  (rescore.has_edition(conn, *asked), bench.has_edition_before(conn, *asked, "2026-07-20"),
+                   bench.has_edition_before(conn, *asked, "2026-07-21")))
+            run = bench.cold(conn, "2026-07-13", "2026-07-21", catalogue, None, key, progress=False)
+        pairs = run["pairs"]
+
+        def at(region, day, rank, family="Bench Cup"):
+            return next((p for p in pairs if (p["region"], p["day"], p["rank"], p["family"])
+                         == (region, day, rank, family)), {})
+
+        first, doubled, new = at("EU", "2026-07-13", 100), at("EU", "2026-07-20", 100), at("NAC", "2026-07-20", 100)
+        check("each cup is priced from the editions before its day: last week's, straight",
+              ("previous edition", round(base[100], 1), round(base[100] * 1.05, 1)),
+              (first.get("source"), first.get("forecast"), first.get("result")))
+        check("and never from its own result, twice last week's", (True, True),
+              (doubled.get("forecast", 0) < 1.1 * base[100], doubled.get("result", 0) > 1.9 * base[100]))
+        check("a cup new in its region reads another rung than editions of its own", (True, "family"),
+              (bool(new), new.get("source")))
+        cut = at("EU", "2026-07-13", 100, family=listed["kind"])
+        check("a cup the list carried is priced off its row, the cut it pays out on among its ranks",
+              ("calendar", 100, True), (cut.get("input"), cut.get("cut"), cut.get("at_cut")))
+        check("the ranks priced: the six, the cut and every deeper rank the standings hold",
+              [10, 25, 100, 250, 500, 1000, 2500],
+              sorted(p["rank"] for p in pairs
+                     if (p["region"], p["day"], p["family"]) == ("EU", "2026-07-13", "Bench Cup")))
+        check("a cup whose scoring the database only assumes is left out, and counted", 1,
+              run["skipped"]["a row the page does not open by itself"])
+
+        # The model a cup reads is the last daily update's: collected at 16:00
+        # UTC, online half an hour later, holding what was over by then.
+        check("a cup reads the model of the last update online before it starts",
+              ["2026-07-20 16:00:00", "2026-07-19 16:00:00", "2026-07-19 16:00:00", "2026-07-20"],
+              [bench.cutoff_of("2026-07-20 18:00:00"), bench.cutoff_of("2026-07-20 08:00:00"),
+               bench.cutoff_of("2026-07-20 16:15:00"), bench.cutoff_of("2026-07-20 18:00:00", "day")])
+        morning = {"start_time": "2026-07-20 08:00:00", "end_time": "2026-07-20 11:00:00"}
+        late = {"start_time": "2026-07-20 15:00:00", "end_time": "2026-07-20 18:00:00"}
+        check("which holds the tournaments over by its collection, and no other",
+              [True, False, True, False],
+              [bench.held(morning, "2026-07-20 16:00:00"), bench.held(late, "2026-07-20 16:00:00"),
+               bench.held({"start_time": "2026-07-19 18:00:00", "end_time": "2026-07-19 21:00:00"}, "2026-07-20"),
+               bench.held(morning, "2026-07-20")])
+        with db.session(bench_db) as conn:
+            evening = {by: next((p["source"] for p in bench.cold(conn, "2026-07-20", "2026-07-21", {}, None, key,
+                                                                  by, progress=False)["pairs"]
+                                 if (p["family"], p["region"], p["rank"]) == ("Morning Cup", "EU", 100)), None)
+                       for by in ("update", "day")}
+        check("an evening cup reads the morning's edition in another region; the day before's model has none",
+              ("family", True), (evening["update"], evening["day"] != "family"))
+
+        # The update keeps Paris time: 18:00 is 16:00 UTC until the last
+        # Sunday of October, 17:00 from that day to the last Sunday of March.
+        check("the update's hour is Paris time, through both changes of the clocks",
+              ["2026-10-24 16:00:00", "2026-10-25 17:00:00", "2026-10-25 17:00:00", "2026-03-28 17:00:00",
+               "2026-03-29 16:00:00"],
+              [bench.cutoff_of("2026-10-24 20:00:00"), bench.cutoff_of("2026-10-25 17:30:00"),
+               bench.cutoff_of("2026-10-26 17:29:00"), bench.cutoff_of("2026-03-29 16:29:00"),
+               bench.cutoff_of("2026-03-29 16:30:00")])
+        check("another hour, or a second update a day, is an option away",
+              ["2026-07-20 14:00:00", "2026-07-20 16:00:00", "2026-07-20 20:15:00"],
+              [bench.cutoff_of("2026-07-20 15:00:00", "update", ("16:00",)),
+               bench.cutoff_of("2026-07-20 20:30:00", "update", bench.clocks("22:15,18:00")),
+               bench.cutoff_of("2026-07-20 20:45:00", "update", bench.clocks("22:15,18:00"))])
+        # The replayed tables read the raw pages the harvest keeps: a run
+        # pointed at a folder without them says so, in print and in its file.
+        out, printed, kept = os.path.join(workdir, "bench.json"), io.StringIO(), rescore.RAW
+        with contextlib.redirect_stdout(printed):
+            code = bench.main(["--cold", "--since", "2026-07-13", "--until", "2026-07-21", "--db", bench_db,
+                               "--catalogue", folder, "--cache", "none", "--json", out,
+                               "--leaderboards", os.path.join(workdir, "no-pages")])
+        with open(out, encoding="utf-8") as fh:
+            written = json.load(fh)
+        check("a run without the raw pages warns, notes it, and leaves the reader as it found it",
+              (0, True, 0, ["18:00"], len(pairs), True),
+              (code, "WARNING: no raw leaderboard pages" in printed.getvalue(), written["leaderboards"]["events"],
+               written["update"]["paris"], len(written["pairs"]), rescore.RAW == kept))
+        # Two boards of the day in the Middle East, one over by the update and
+        # one still running then: only the first had final standings to replay.
+        with db.session(bench_db) as conn:
+            for name, hour in (("Donor Morning", 8), ("Donor Running", 15)):
+                cid = db.create_competition(conn, f"{name} ME", region="ME", team_mode="Solo",
+                                            game_mode="Battle Royale", start_time=f"2026-07-27 {hour:02d}:00",
+                                            end_time=f"2026-07-27 {hour + 3:02d}:00", ranks=sorted(base),
+                                            max_games=10, scoring=table)
+                db.update_competition(conn, cid, family=name, source="osirion", event_id=f"donor_{hour}",
+                                      window_id="window")
+                db.set_finals(conn, cid, dict(base))
+            cutoff = bench.cutoff_of("2026-07-27 18:00:00")
+            asked = (conn, "ME", "Solo", "Battle Royale", rescore.platform_of("Donor Morning ME"), cutoff)
+            listed_donors = [c["family"] for c in rescore.candidates(*asked)]
+            bench_donors = [c["family"] for c in bench.donors_over_by(rescore.candidates, cutoff)(*asked)]
+            original = rescore.candidates, rescore.has_edition
+            bench.cold_cell(conn, {"kind": "Donor Test", "name": "Donor Test ME", "region": "ME", "team": "Solo",
+                                   "mode": "Battle Royale", "games": 10, "scoring": table, "tiers": []}, cutoff)
+        check("a board still running at the update is no donor to the replay, though it started before it",
+              (["Donor Running", "Donor Morning"], ["Donor Morning"], True),
+              (listed_donors, bench_donors, (rescore.candidates, rescore.has_edition) == original))
+
+        # The replay end to end, from pages on disk: a cup new in the Middle
+        # East, whose own result the database already holds; two boards of the
+        # region over before the update, and a third still running then.
+        replay_db, pages = os.path.join(workdir, "replay.db"), os.path.join(workdir, "pages")
+        db.init_db(replay_db)
+        with db.session(replay_db) as conn:
+            edition(conn, "Replay Cup", "EU", "2026-07-13", 1.0)
+            edition(conn, "Replay Cup", "ME", "2026-07-20", 1.0)
+            for name, day, hour in (("Board A", "2026-07-18", 10), ("Board B", "2026-07-19", 10),
+                                    ("Board Late", "2026-07-20", 15)):
+                cid = db.create_competition(conn, f"{name} ME", region="ME", team_mode="Solo",
+                                            game_mode="Battle Royale", start_time=f"{day} {hour:02d}:00",
+                                            end_time=f"{day} {hour + 3:02d}:00", ranks=sorted(base),
+                                            max_games=10, scoring=table)
+                event = "epicgames_" + name.replace(" ", "")
+                db.update_competition(conn, cid, family=name, source="osirion", event_id=event,
+                                      window_id=event + "_ME")
+                db.set_finals(conn, cid, dict(base))
+                entries = [{"teamId": f"t{n}", "rank": n, "pointsEarned": 0, "sessionHistory": [
+                    {"trackedStats": {osirion.PLACEMENT_STAT: (n * 7 + g * 13) % 100 + 1, osirion.ELIMS_STAT: g % 4},
+                     "endTime": f"{day}T{hour + 1:02d}:{g * 5:02d}:00Z"} for g in range(10)]} for n in range(1, 151)]
+                folder = os.path.join(pages, rescore.slug(event))
+                os.makedirs(folder, exist_ok=True)
+                with gzip.open(os.path.join(folder, rescore.slug(event + "_ME") + "_p000.json.gz"), "wt",
+                               encoding="utf-8") as fh:
+                    json.dump({"success": True, "leaderboard": {"page": 0, "totalPages": 1, "entries": entries}}, fh)
+            target = next(c for c in export_model.load_competitions(conn)
+                          if (c.get("family"), c.get("region")) == ("Replay Cup", "ME"))
+            kept, rescore.RAW = rescore.RAW, pages
+            try:
+                cell = bench.cold_cell(conn, bench.database_row(target), bench.cutoff_of("2026-07-20 18:00:00"))
+                listed_cell = rescore.cold_table(conn, bench.database_row(target), before="2026-07-20 16:00:00")
+            finally:
+                rescore.RAW = kept
+        check("the replay reads the two boards over before the update, though the cup's own result is in",
+              (2, None), ((cell or {}).get("donors"), listed_cell))
+        runs = {}
+        for label, folder in (("pages", pages), ("none", os.path.join(workdir, "no-pages"))):
+            out, printed = os.path.join(workdir, f"replay-{label}.json"), io.StringIO()
+            with contextlib.redirect_stdout(printed):
+                bench.main(["--cold", "--since", "2026-07-20", "--until", "2026-07-21", "--db", replay_db,
+                            "--catalogue", os.path.join(workdir, "no-catalogue"), "--cache", "none",
+                            "--json", out, "--leaderboards", folder])
+            with open(out, encoding="utf-8") as fh:
+                written = json.load(fh)
+            runs[label] = (written, "WARNING" in printed.getvalue(),
+                           sorted({p["source"] for p in written["pairs"] if p["family"] == "Replay Cup"}))
+        # Two tables with the pages: the cup's, and the late board's own, new
+        # in the region too (its forecasts refused: no field for a first board).
+        check("pointed at the pages, a run replays the cup and says nothing; without them it warns and falls back",
+              ((3, False, 2, 2, ["family + re-scored boards"]), (0, True, 0, 0, ["family"])),
+              tuple((w["leaderboards"]["events"], warned, w["replays"]["cups"], w["replays"]["boards_with_pages"],
+                     rungs) for w, warned, rungs in (runs["pages"], runs["none"])))
+
+        # What a model is keyed on: a change to the lines that choose its
+        # tournaments, or to the tournaments the app loads, is a new model.
+        chooser = bench.held
+        try:
+            bench.held = lambda comp, cutoff: True
+            moved = bench.model_key(replay_db)
+        finally:
+            bench.held = chooser
+        with db.session(replay_db) as conn:
+            comps = export_model.load_competitions(conn)
+            keys = {bench.Models(conn, comps, "k", None).key, bench.Models(conn, comps[1:], "k", None).key}
+        check("a model's key moves with the bench's own choice of tournaments, and with the list it is handed",
+              (True, 2), (moved != bench.model_key(replay_db), len(keys)))
+        # The bias list, on forecasts made up so the answer is known: a family
+        # leaning 10 % low, played in seven regions an evening, the last one
+        # after midnight UTC, with a field only counted once it was over.
+        def made(family, region, start, error, drawn=3000):
+            return {"rank": 100, "at_cut": False, "region": region, "game_mode": "Battle Royale",
+                    "team_mode": "Solo", "field": 3000, "guessed_field": "", "result_field": drawn,
+                    "previous_field": 0, "source": "previous edition", "entry": "", "round_day": "one session",
+                    "first_week": False, "lobby": False, "input": "calendar", "family": family,
+                    "day": start[:10], "local_day": bench.local_day(start, region),
+                    "window": f"{family}|{region}|{start}", "forecast": 100.0 + error, "result": 100.0}
+
+        clock = (("OCE", "07"), ("ASIA", "09"), ("ME", "15"), ("EU", "17"), ("BR", "21"), ("NAC", "23"))
+        leaning = (-20, -10, -10, -10, 0, -10, -5)
+
+        def evenings(days):
+            out = []
+            for day in days:
+                night = (datetime.fromisoformat(day) + timedelta(days=1)).strftime("%Y-%m-%d")
+                starts = [(r, f"{day} {h}:00:00") for r, h in clock] + [("NAW", f"{night} 01:00:00")]
+                out += [made("Lean Cup", r, at, e, drawn=0) for (r, at), e in zip(starts, leaning)]
+            return out
+
+        plain = [made(f"Plain Cup {n}", r, f"2026-07-{10 + n:02d} {h}:00:00", e)
+                 for n in range(6) for (r, h), e in zip(clock, (-3, 3, -1, 1, -2, 2))]
+        found = {n: {(b["cut"], b["value"]): b for b in bench.biases(evenings(days) + plain, top=50)}
+                 for n, days in ((2, ("2026-07-20", "2026-07-27")), (3, ("2026-07-20", "2026-07-27", "2026-08-03")))}
+        lean = found[3].get(("family", "Lean Cup"), {})
+        errors = [float(e) for e in leaning * 3]
+        after = bench.AFTER
+        try:
+            bench.AFTER = set()
+            unguarded = {(b["cut"], b["value"]) for b in bench.biases(evenings(("2026-07-20", "2026-07-27",
+                                                                             "2026-08-03")) + plain, top=50)}
+        finally:
+            bench.AFTER = after
+        drawn = ("field drawn", f"{bench.calibration.FIELD_CAP:,}+ (not counted)")
+        check("a bias needs three evenings: an event in seven regions is one draw, and the list never offers "
+              "the field a cup drew",
+              (False, True, 3, False, True),
+              (("family", "Lean Cup") in found[2], bool(lean), lean.get("family_days"), drawn in found[3],
+               drawn in unguarded))
+        # Skewed errors: the factor that helps most is not one plus the median.
+        check("and its cost is the most one factor on its forecasts takes away, not a shift of every error",
+              (round(bench.gain_of(errors)[1], 6), True, (-5, 18.57)),
+              (round(lean.get("cost", 0), 6), bench.gain_of(errors)[1] < sum(abs(e) for e in errors)
+               - sum(abs(e + 10) for e in errors),
+               tuple(round(v, 2) for v in bench.gain_of([-30, -10, -5, 40, 80]))))
+
     print("\n" + "=" * 68)
     if FAILURES:
         print(f"  {len(FAILURES)} failure(s):")
