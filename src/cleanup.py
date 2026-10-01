@@ -49,7 +49,7 @@ def always_keep() -> set[str]:
             "harvest_osirion.py", "calendar_snapshot.py", "refresh.py",
             "selfcheck.py", "check_forms.py", "fuzz_api.py", "test_osirion.py",
             "cleanup.py", "export_model.py", "backtest.py", "import_session.py",
-            "pull_live.py", "rescore.py", "coldbench.py", "bench.py", "tidy.py"}
+            "pull_live.py", "rescore.py", "coldbench.py", "bench.py", "bench_live.py", "bench_compare.py", "tidy.py"}
     for folder in {HERE, ROOT}:
         for name in os.listdir(folder):
             if os.path.isdir(os.path.join(folder, name)):

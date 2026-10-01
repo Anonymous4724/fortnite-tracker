@@ -32,8 +32,11 @@ the replay is faithful.
 The result is read off the first version of `model.json` whose category row
 for the cup - its label, region, team size and game mode, the key
 `export_model.category_row` looks up - holds an edition dated the window's
-day (`latest`). Two windows of one cup on one day cannot be told apart there
-and are left out. Since 22 September `direct` is not the edition's own value:
+day (`latest`), among the versions committed once the window's board had
+settled (its end plus SETTLE_MINUTES): an update that ran while the cup was
+being played exported the board of that minute, which the next one replaced.
+Two windows of one cup on one day cannot be told apart there and are left
+out. Since 22 September `direct` is not the edition's own value:
 it is the latest edition averaged with the ones before it played the same
 way (`calibration.smoothed_run`, weight DIRECT_ALPHA on the newest). So the
 value is taken back out of it, against the version before, whose cell was the
@@ -70,20 +73,21 @@ same cups can lean under two names - the second day of the FNCS Solo
 qualifiers is also a field that shrank - so each bias says which costlier one
 holds most of its forecasts.
 
-What the list of 22 to 30 September said, 139 forecasts of 60 cups: 8.8 %
-off in median, 5.7 % low in median, 36 % of the results inside the inner
-range and 75 % inside the outer one where they claim 50 and 90. The biases,
-costliest first: the Mobile Reload Victory Cup of 26 September, whose field
-grew by 60 to 120 % from one week to the next with nothing in its row to say
-so (-11 %, 7 cups); the cups new to their region (-7.7 %, 41 cups), priced
-off other regions and replayed boards, each event its own way; and the second
-day of the FNCS Solo qualifiers (+4.1 %, 7 cups out of 7), priced off the
-first day, which more players had played - the one with a rule behind it, now
-`export_model.later_day_shifts`. Measured on the second days over before
-29 September 16:00 UTC (Oceania, Asia) and priced on the four after it, the
-move takes their error from 3.8 % to 1.7 % on average and their lean from
-+3.9 % to +0.2 %; the ranks of the top hundred, which the second day barely
-moves, gain nothing until more second days have been measured.
+What the list of 22 to 30 September said, 152 forecasts of 68 cups noted from
+24 September on (the history of 1 October): 8.1 % off in median, 4.2 % low in
+median, 36 % of the results inside the inner range and 77 % inside the outer
+one where they claim 50 and 90. The biases, costliest first: the Mobile
+Reload Victory Cup of 26 September, whose field grew by 60 to 120 % from one
+week to the next with nothing in its row to say so (-11 %, 7 cups); the cups
+new to their region, priced off the family and replayed boards (-8.6 %, 22
+cups), each event its own way; and the second day of the FNCS Solo qualifiers
+(+4.1 %, 7 cups out of 7), priced off the first day, which more players had
+played - the one with a rule behind it, now `export_model.later_day_shifts`.
+Measured on the second days over before 29 September 16:00 UTC (Oceania,
+Asia) and priced on the four after it, the move takes their error from 3.8 %
+to 1.7 % on average and their lean from +3.9 % to +0.2 %; the ranks of the
+top hundred, which the second day barely moves, gain nothing until more
+second days have been measured.
 """
 from __future__ import annotations
 
@@ -95,6 +99,7 @@ import statistics
 import subprocess
 import sys
 from collections import Counter, OrderedDict
+from datetime import datetime, timedelta, timezone
 
 # The app's modules, whichever way this file is run: `-m analysis.coldbench`
 # puts them on the path through the package, a direct run does not.
@@ -134,6 +139,12 @@ TOP = 8
 RANK_BANDS = ((1, 10), (11, 100), (101, 1000), (1001, 10 ** 9))
 FIELD_BANDS = ((1, 100), (101, 1000), (1001, 3000), (3001, calibration.FIELD_CAP - 1))
 
+# A board goes on moving for a while after its window closes, as the games
+# under way at the buzzer come in: the harvest reads none before this many
+# minutes (harvest_osirion.SETTLE_MINUTES). A model committed before then
+# cannot hold the cup's final standings, only the board as it stood.
+SETTLE_MINUTES = 30
+
 
 # --------------------------------------------------------------------------- #
 # The predictor's history
@@ -171,6 +182,28 @@ def versions(repo: str, path: str) -> list[tuple[str, str]]:
     """(commit, blob of `path` there), oldest first, for every commit that changed it."""
     return [(commit, blob_at(repo, commit, path))
             for commit in git(repo, "log", "--reverse", "--format=%H", "--", path).split()]
+
+
+def commit_times(repo: str, path: str) -> dict[str, str]:
+    """commit -> when it was made, in UTC ("YYYY-MM-DDTHH:MM"), for every
+    commit that changed `path`."""
+    out = {}
+    for line in git(repo, "log", "--format=%H %ct", "--", path).splitlines():
+        commit, _, stamp = line.partition(" ")
+        if stamp.strip().isdigit():
+            out[commit] = datetime.fromtimestamp(int(stamp), timezone.utc).strftime("%Y-%m-%dT%H:%M")
+    return out
+
+
+def settled_by(row: dict) -> str:
+    """When the window's board stopped moving, in UTC ("YYYY-MM-DDTHH:MM"):
+    its end plus SETTLE_MINUTES, or "" for a row that states no readable end."""
+    end = str(row.get("end") or "").replace("Z", "")[:16]
+    try:
+        closed = datetime.strptime(end, "%Y-%m-%dT%H:%M")
+    except ValueError:
+        return ""
+    return (closed + timedelta(minutes=SETTLE_MINUTES)).strftime("%Y-%m-%dT%H:%M")
 
 
 def blob_at(repo: str, commit: str, path: str) -> str:
@@ -228,7 +261,7 @@ def taken_back(after: float, before: float) -> float:
     return math.exp((math.log(after) - (1 - ALPHA) * math.log(before)) / ALPHA)
 
 
-def edition_of(models: list[dict], key: tuple, day: str) -> dict:
+def edition_of(models: list[dict], key: tuple, day: str, settled: str = "") -> dict:
     """The versions an edition of the cup dated `day` is read between, and how.
 
     {"after": index, "later": [later indexes still ending on that edition],
@@ -241,13 +274,25 @@ def edition_of(models: list[dict], key: tuple, day: str) -> dict:
     a run goes on only through editions played the same way - so it is decided
     per edition before: rank 20's and a deep rank's can be two different ones,
     when the last edition did not reach the deep rank.
+
+    `settled` is when the window's board stopped moving (`settled_by`). A
+    version committed before then (its "at") holds the board an update read
+    while the cup ran - on 24 September the 18:00 update caught the Middle
+    East's Reload Icon Cup an hour from its close, 213 points at rank 50 for
+    a cup that finished on 520 - so the edition is read from the first
+    version committed after it, against the version before the first to hold
+    the day at all.
     """
     holding = [i for i, m in enumerate(models) if (m["rows"].get(key) or {}).get("latest") == day]
-    after = holding[0] if holding else None
-    if after is None:
+    if not holding:
         newest = max((str(r.get("latest") or "") for r in models[-1]["rows"].values()), default="") if models else ""
         return {"skip": "played after the newest model" if day > newest else "no edition of that day in any model"}
-    before = next((i for i in range(after - 1, -1, -1) if key in models[i]["rows"]), None)
+    before = next((i for i in range(holding[0] - 1, -1, -1) if key in models[i]["rows"]), None)
+    if settled:
+        holding = [i for i in holding if str(models[i].get("at") or "9999") >= settled]
+        if not holding:
+            return {"skip": "every model holding that day was made while the cup ran"}
+    after = holding[0]
     ra = models[after]["rows"][key]
     rb = models[before]["rows"][key] if before is not None else None
     if rb and str(rb.get("latest") or "") >= day:
@@ -529,11 +574,13 @@ class History:
                         listed[ident] = (version, row)
         keys = {key_of(row) for _, row in listed.values()}
         self.models, self.by_blob = [], {}
+        made = commit_times(repo, "model.json")
         for commit, blob in versions(repo, "model.json"):
             if blob in self.by_blob:
                 continue
             self.by_blob[blob] = len(self.models)
-            self.models.append(dict(slim(json.loads(self.blobs.read(blob)), keys), commit=commit, blob=blob))
+            self.models.append(dict(slim(json.loads(self.blobs.read(blob)), keys), commit=commit, blob=blob,
+                                    at=made.get(commit, "")))
         same_day = Counter((key_of(row), str(row["begin"])[:10]) for _, row in listed.values())
         self.work = []
         for _, (version, row) in sorted(listed.items(), key=lambda kv: kv[1][1]["begin"]):
@@ -541,7 +588,7 @@ class History:
             if same_day[(key, day)] > 1:
                 self.skipped["two windows of the cup that day"] += 1
                 continue
-            edition = edition_of(self.models, key, day)
+            edition = edition_of(self.models, key, day, settled_by(row))
             if "skip" in edition:
                 self.skipped[edition["skip"]] += 1
                 continue

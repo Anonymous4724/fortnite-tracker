@@ -21,7 +21,13 @@ the update was skipped or run again by hand the page had another model
 (`coldbench` reads what the list really published). `--cutoff day` prices
 every cup of a day from the tournaments that started before the day instead,
 exactly what `export_model.py --before DAY` writes, a cup still running at
-midnight included.
+midnight included. `--cutoff published` prices each cup from the model the
+page really served when it started, the last model.json committed to the
+page's repository before it (`--ladder`), rebuilt with today's code from the
+rows the database held by the commit (`created_at`) and over by then, and its
+replays from the same rows: the tournaments of every model served since the
+database began dating its rows (CREATED_SINCE), but for the odd board still
+running at the commit, which the page held half-played.
 
 Each cup is priced the way the page prices it when its row of the list is
 clicked:
@@ -65,11 +71,32 @@ the field it drew, are shown but never offered as biases.
     python -m analysis.bench --cold --weeks 6         the last six weeks
     python -m analysis.bench --cold --since 2026-08-19 --until 2026-09-30
     python -m analysis.bench --cold --cutoff day      each day from the model of the day before
+    python -m analysis.bench --cold --cutoff published --since 2026-09-06   the model the page served
     python -m analysis.bench --cold --update 16:00    the daily update at another hour (Paris time)
     python -m analysis.bench --cold --update 18:00,22:15   two updates a day
     python -m analysis.bench --cold --json out.json   every forecast, the tables and the biases
     python -m analysis.bench --cold --cache DIR       where the models are kept
     python -m analysis.bench --cold --leaderboards DIR   the raw leaderboard pages the replays read
+    python -m analysis.bench --cold --jobs 3          the cutoffs priced in three processes
+    python -m analysis.bench --cold --variant my_idea.py   today's code and a variant of it, side by side
+    python -m analysis.bench --compare a.json b.json   two runs written with --json, side by side
+    python -m analysis.bench --live --weeks 3         the forecast during each cup (analysis/bench_live.py)
+
+`--jobs` prices the models' cutoffs in that many processes, each with its own
+read-only connection; the forecasts, the counts and the file written are the
+same as one process gives, in the same order. A run starts no more processes
+than it has cutoffs, nor than the system has processors, and says how many.
+Each process holds its own models, about 0.5 to 1.4 GB depending on their
+size: the memory a run takes grows with `--jobs`. `--variant` names a Python
+file that replaces some of the app's functions (see `Variant`): the run prices
+the same cups twice from the same database, catalogue and pages, as the code
+is and with the file's replacements, writes the second run beside the first
+(`--json out.json` also writes out.variant.json) and sets the two against each
+other. The file is read as the run starts, and what runs is that text, in
+every process, whatever becomes of the file meanwhile. It only runs once
+today's run is over and written: a variant that fails, exits or is refused
+leaves today's run written, no out.variant.json beside it, and ends with a
+code that says so.
 
 The span holds the cups that started from `--since` up to, not including,
 `--until` (default today, UTC). Each model is kept in the cache (the system's
@@ -87,19 +114,29 @@ them).
 from __future__ import annotations
 
 import argparse
+import ast
+import contextlib
 import functools
 import glob
 import gzip
 import hashlib
+import importlib
 import inspect
+import io
 import json
+import multiprocessing
 import os
+import re
 import sqlite3
 import statistics
+import subprocess
 import sys
 import tempfile
 import time
+import traceback
+import types
 from collections import Counter, OrderedDict
+from concurrent.futures import ProcessPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -125,6 +162,11 @@ CATALOGUE = os.path.join(_ROOT, "data", "osirion", "catalogue")
 # update runs on, and how long its model then takes to go online.
 UPDATES = ("18:00",)
 PUBLISH_MINUTES = 30
+# The page's own repository, whose history holds every model.json it served.
+LADDER = os.path.join(os.path.dirname(_ROOT), "threshold-ladder")
+# The database dates each row (`created_at`, Paris time) from this moment (UTC)
+# only: every row it held then was given that evening's date.
+CREATED_SINCE = "2026-09-05 20:00:00"
 
 # The ranks every cup is priced at, where its final standings hold them, on
 # top of the cut and every deeper rank the standings hold.
@@ -138,6 +180,12 @@ MODEL_CODE = ("export_model.py", "calibration.py", "predict.py", "db.py")
 MODEL_TABLES = ("validation.json", "pace.json", "blend.json")
 # A kept model of another key is dropped once this many days old.
 CACHE_DAYS = 14
+# Windows waits on 63 handles at most, two of them the pool's own: the most
+# processes `--jobs` runs there.
+WINDOWS_JOBS = 61
+# The app's modules a variant makes its replacements on: each time it is
+# applied, they are put back after as they were before.
+VARIANT_MODULES = ("export_model", "calibration", "predict", "rescore", "db", "calendar_snapshot")
 
 RANK_BANDS = ((1, 10), (11, 25), (26, 100), (101, 250), (251, 500), (501, 1000),
               (1001, 2500), (2501, 10 ** 9))
@@ -165,16 +213,22 @@ def paris_in_utc(day: date, clock: str) -> datetime:
     return datetime(day.year, day.month, day.day, hours, minutes) - timedelta(hours=2 if summer else 1)
 
 
-def cutoff_of(start: str, by: str = "update", updates: tuple = UPDATES) -> str:
+def cutoff_of(start: str, by: str = "update", updates: tuple = UPDATES, served: list | None = None) -> str:
     """The model a cup starting at `start` ("YYYY-MM-DD HH:MM:SS", UTC) is
     priced from, named by its cutoff: the collection time in UTC ("YYYY-MM-DD
     16:00:00" for 18:00 in Paris in summer time) of the last update whose model
-    was online when the cup started, `updates` being their hours in Paris; or
-    with `by="day"` the cup's day ("YYYY-MM-DD"), everything that started
-    before it."""
+    was online when the cup started, `updates` being their hours in Paris; with
+    `by="day"` the cup's day ("YYYY-MM-DD"), everything that started before
+    it; with `by="published"` the time (UTC) the model the page served then was
+    committed, `served` being those times, oldest first."""
     day = str(start or "")[:10]
     if by == "day":
         return day
+    if by == "published":
+        found = [at for at in served or () if at <= str(start)[:19]]
+        if not found:
+            raise ValueError(f"no model served before {start}")
+        return found[-1]
     begins = datetime.fromisoformat(str(start)[:19])
     online = timedelta(minutes=PUBLISH_MINUTES)
     for back in range(3):
@@ -197,6 +251,32 @@ def held(comp: dict, cutoff: str) -> bool:
     if len(cutoff) == 10:
         return str(comp.get("start_time") or "")[:10] < cutoff
     return over_by(comp) <= cutoff
+
+
+def served(ladder: str) -> list[str]:
+    """When each model.json the page served was committed to its repository,
+    in UTC ("YYYY-MM-DD HH:MM:SS"), oldest first; none where there is no such
+    history."""
+    try:
+        out = subprocess.run(["git", "-C", ladder, "log", "--format=%cI", "--", "model.json"],
+                             capture_output=True, text=True, check=True).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return []
+    return sorted(datetime.fromisoformat(line.strip()).astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+                  for line in out.splitlines() if line.strip())
+
+
+def paris_of(at: str) -> str:
+    """A UTC time ("YYYY-MM-DD HH:MM:SS") as the clock in Paris read it, the
+    clock the database writes `created_at` on."""
+    when = datetime.fromisoformat(at)
+    summer = last_sunday(when.year, 3) <= when.date() < last_sunday(when.year, 10)
+    return (when + timedelta(hours=2 if summer else 1)).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def created_before(comp: dict, clock: str | None) -> bool:
+    """Was the row in the database by `clock` (Paris time)? Always, for none."""
+    return clock is None or str(comp.get("created_at") or "") < clock
 
 
 def digest(paths: list[str]) -> str:
@@ -224,6 +304,22 @@ def file_sha1(path: str) -> str:
     with open(path, "rb") as fh:
         for block in iter(lambda: fh.read(1 << 20), b""):
             h.update(block)
+    return h.hexdigest()
+
+
+def catalogue_sha1(folder: str) -> str:
+    """One SHA-1 over what `load_catalogue` reads: each catalogue file by name
+    and by its content once uncompressed, so two runs can tell whether they
+    rebuilt their rows from the same catalogue."""
+    h = hashlib.sha1()
+    for path in sorted(glob.glob(os.path.join(folder, "*.json.gz"))):
+        h.update(os.path.basename(path).encode() + b"\0")
+        try:
+            with gzip.open(path, "rb") as fh:
+                for block in iter(lambda: fh.read(1 << 20), b""):
+                    h.update(block)
+        except (OSError, EOFError):
+            h.update(b"-")
     return h.hexdigest()
 
 
@@ -286,14 +382,16 @@ class Models:
         export_model._KIN.clear()
         return json.loads(text)
 
-    def prune(self, days: int = CACHE_DAYS) -> int:
-        """Drop the models of other keys nobody has built or read for `days`
-        days: each new database is a new key, and a new set of models."""
+    def prune(self, days: int = CACHE_DAYS, keep=()) -> int:
+        """Drop the models of other keys built `days` days ago or more: each
+        new database is a new key, and a new set of models. Reading a model
+        leaves its file's date as it was, so the keys a run read besides its
+        own (`keep`) stay too."""
         if not self.cache or not os.path.isdir(self.cache):
             return 0
-        horizon, dropped = time.time() - days * 86400, 0
+        horizon, dropped, spared = time.time() - days * 86400, 0, {self.key, *keep}
         for path in glob.glob(os.path.join(self.cache, "model-*.json.gz")):
-            if path.endswith(f"-{self.key}.json.gz"):
+            if os.path.basename(path)[:-len(".json.gz")].rsplit("-", 1)[-1] in spared:
                 continue
             try:
                 if os.path.getmtime(path) < horizon:
@@ -364,28 +462,32 @@ def database_row(comp: dict) -> dict:
             "tiers": [], "entry": comp.get("entry") or "", "field": 0}
 
 
-def has_edition_before(conn, kind: str, region: str, team_mode: str, game_mode: str, cutoff: str) -> bool:
-    """`rescore.has_edition`, asked of the editions the model of `cutoff` holds."""
+def has_edition_before(conn, kind: str, region: str, team_mode: str, game_mode: str, cutoff: str,
+                       clock: str | None = None) -> bool:
+    """`rescore.has_edition`, asked of the editions the model of `cutoff` holds
+    (and, given a `clock`, the database held by then)."""
     held_by = "c.start_time < ?" if len(cutoff) == 10 else "COALESCE(c.end_time, c.start_time) <= ?"
     rows = conn.execute(
         "SELECT c.name, c.family, c.stage, c.source, c.round_no FROM competition c WHERE c.region = ? "
         f"AND c.team_mode = ? AND c.game_mode = ? AND {held_by} "
-        "AND EXISTS (SELECT 1 FROM final_result f WHERE f.competition_id = c.id)",
-        (region, team_mode, game_mode, cutoff)).fetchall()
+        + ("AND c.created_at < ? " if clock else "")
+        + "AND EXISTS (SELECT 1 FROM final_result f WHERE f.competition_id = c.id)",
+        (region, team_mode, game_mode, cutoff) + ((clock,) if clock else ())).fetchall()
     return any(db.category_of(dict(row)) == kind for row in rows)
 
 
-def donors_over_by(pool, cutoff: str):
+def donors_over_by(pool, cutoff: str, clock: str | None = None):
     """`rescore.candidates` (passed as `pool`), keeping only the boards the
-    model of `cutoff` holds. The list asks for boards that started before a
-    date, but on a day of the past the database also holds the final
-    standings of a board still running at the update, which nobody had then."""
+    model of `cutoff` holds (and, given a `clock`, the database held by then).
+    The list asks for boards that started before a date, but on a day of the
+    past the database also holds the final standings of a board still running
+    at the update, which nobody had then."""
     def candidates(*args, **kwargs):
-        return [c for c in pool(*args, **kwargs) if held(c, cutoff)]
+        return [c for c in pool(*args, **kwargs) if held(c, cutoff) and created_before(c, clock)]
     return candidates
 
 
-def cold_cell(conn, row: dict, cutoff: str) -> dict | None:
+def cold_cell(conn, row: dict, cutoff: str, clock: str | None = None) -> dict | None:
     """The replay the list would have hung on the row, beside the model of
     `cutoff`.
 
@@ -396,8 +498,8 @@ def cold_cell(conn, row: dict, cutoff: str) -> dict | None:
     """
     asked, pool = rescore.has_edition, rescore.candidates
     rescore.has_edition = lambda conn_, kind, region, team, mode: has_edition_before(
-        conn_, kind, region, team, mode, cutoff)
-    rescore.candidates = donors_over_by(pool, cutoff)
+        conn_, kind, region, team, mode, cutoff, clock)
+    rescore.candidates = donors_over_by(pool, cutoff, clock)
     try:
         return rescore.cold_table(conn, row, before=cutoff)
     finally:
@@ -484,7 +586,8 @@ def round_day(window_id) -> str:
 
 
 def price(conn, model: dict, comp: dict, catalogue: dict, cutoff: str, starts: dict,
-          skipped: Counter, refused: Counter, replayed: Counter | None = None) -> list[dict]:
+          skipped: Counter, refused: Counter, replayed: Counter | None = None,
+          clock: str | None = None) -> list[dict]:
     """Every rank of one cup the page prices and its final standings hold."""
     finals = {int(r): float(v) for r, v in (comp.get("finals") or {}).items() if v and float(v) > 0}
     if not finals:
@@ -497,7 +600,7 @@ def price(conn, model: dict, comp: dict, catalogue: dict, cutoff: str, starts: d
             skipped["catalogue row the list leaves out, priced off the database"] += 1
         row, source = database_row(comp), "database"
     reads = replayed["reads"] if replayed is not None else 0
-    row["cold"] = cold_cell(conn, row, cutoff)
+    row["cold"] = cold_cell(conn, row, cutoff, clock)
     if replayed is not None:
         if row["cold"]:
             replayed["cups"] += 1
@@ -711,77 +814,310 @@ def span_of(args) -> tuple[str, str]:
     return since, until
 
 
-def cold(conn, since: str, until: str, catalogue: dict, cache: str | None, key: str,
-         by: str = "update", progress: bool = True, updates: tuple = UPDATES) -> dict:
-    """Every cup that started in [since, until) and finished, priced from the
-    model before it (see `cutoff_of`). {"pairs", "skipped", "refused",
-    "models", "cups", "built", "read", "model_key", "replays", "bands"}."""
-    comps = export_model.load_competitions(conn)
-    targets: dict = {}
-    for comp in comps:
-        day = str(comp.get("start_time") or "")[:10]
-        if since <= day < until:
-            targets.setdefault(cutoff_of(str(comp.get("start_time") or ""), by, updates), []).append(comp)
-    models = Models(conn, comps, key, cache)
-    starts = season_starts(conn)
-    pairs, skipped, refused, sizes, replayed, bands = [], Counter(), Counter(), {}, Counter(), None
-    # A board replayed for one cup is often a donor for the next: read once,
-    # and noted with the rosters it gave, so two runs can tell whether they
-    # replayed the same boards.
-    reader, boards = rescore.rosters_of, {}
+class Variant:
+    """A Python file that replaces some of the app's functions for a run, to
+    measure a change to the forecast against the code as it is.
 
-    def read_and_note(event_id, window_id):
-        rosters = reader(event_id, window_id)
+    The file defines `apply()`, which makes its replacements on the app's
+    modules (`export_model.predict_from_model = ...`, the modules imported by
+    their own names, as the app imports them) and returns a function that puts
+    them back, or None when nothing needs putting back:
+
+        import export_model
+
+        def apply():
+            plain = export_model.predict_from_model
+
+            def lower(model, t):
+                got = plain(model, t)
+                if got and got.get("value"):
+                    got = dict(got, value=got["value"] * 0.97)
+                return got
+
+            export_model.predict_from_model = lower
+            return lambda: setattr(export_model, "predict_from_model", plain)
+
+    Its run builds its own models, kept under a key that adds the SHA-1 of the
+    file (line endings made plain) to today's: an edit to the file is a new set
+    of models. A file whose replacements are only read once a model is built
+    (the forecast from the model, the row, the replay) may say so with
+    `CHANGES_MODEL = False`, a plain True or False set at the top of the file;
+    its run then reads today's models, after the last model of the span, built
+    again with the file applied, has been found the same as today's.
+
+    The file is read once, and not run until its own run: `apply()` and
+    `CHANGES_MODEL` are found in its text, so a replacement it makes as it is
+    run (outside `apply()`) reaches its run only, never today's. What runs is
+    the text read then, whose SHA-1 the run writes, in this process and in
+    every other: an edit to the file during a run reaches the next run only.
+    Each time it is applied, the text is run afresh and the app's modules
+    (VARIANT_MODULES) are put back after as they were before, whatever
+    `apply()` returned.
+    """
+
+    def __init__(self, path: str, source: bytes | None = None):
+        self.path = os.path.abspath(path)
+        if source is None:
+            with open(self.path, "rb") as fh:
+                source = fh.read()
+        self.source = source
+        self.sha1 = hashlib.sha1(source.replace(b"\r\n", b"\n")).hexdigest()
+        tree = ast.parse(source, self.path)
+        if not any(isinstance(node, ast.FunctionDef) and node.name == "apply" for node in tree.body):
+            raise ValueError(f"{self.path} defines no apply()")
+        self.changes_model = True
+        for node in tree.body:
+            if isinstance(node, ast.Assign):
+                targets = node.targets
+            elif isinstance(node, ast.AnnAssign) and node.value is not None:
+                targets = [node.target]
+            else:
+                continue
+            if any(isinstance(target, ast.Name) and target.id == "CHANGES_MODEL" for target in targets):
+                try:
+                    self.changes_model = bool(ast.literal_eval(node.value))
+                except (ValueError, TypeError):
+                    raise ValueError(f"{self.path}: CHANGES_MODEL is not a plain True or False") from None
+
+    def load(self) -> types.ModuleType:
+        """The text read, run as a module of its own: for its run only."""
+        module = types.ModuleType(f"bench_variant_{self.sha1[:12]}")
+        module.__file__ = self.path
+        exec(compile(self.source, self.path, "exec"), module.__dict__)
+        if not callable(getattr(module, "apply", None)):
+            raise ValueError(f"{self.path} defines no apply()")
+        return module
+
+    def key(self, key: str) -> str:
+        """The key its models are kept under, today's being `key`."""
+        if not self.changes_model:
+            return key
+        return hashlib.sha1(f"{key}|variant|{self.sha1}".encode()).hexdigest()[:16]
+
+    @contextlib.contextmanager
+    def applied(self):
+        kept = [(module, dict(vars(module))) for module in map(importlib.import_module, VARIANT_MODULES)]
+        try:
+            undo = self.load().apply()
+            try:
+                yield self
+            finally:
+                if callable(undo):
+                    undo()
+        finally:
+            for module, names in kept:
+                found = vars(module)
+                for name in set(found) - set(names):
+                    del found[name]
+                found.update(names)
+
+
+class Share:
+    """What one process prices its cutoffs with: a connection, the tournaments
+    the app loads, their models, and the boards the replays read through it."""
+
+    def __init__(self, conn, comps: list[dict], catalogue: dict, cache: str | None, key: str):
+        self.conn, self.catalogue, self.cache, self.key = conn, catalogue, cache, key
+        self.loaded, self.comps = comps, {comp["id"]: comp for comp in comps}
+        self.models = Models(conn, comps, key, cache)
+        self.starts = season_starts(conn)
+        # A board replayed for one cup is often a donor for the next: read
+        # once, and noted with the rosters it gave, so two runs can tell
+        # whether they replayed the same boards.
+        self.reader, self.boards = rescore.rosters_of, {}
+        self.kept = functools.lru_cache(maxsize=256)(self.read_and_note)
+
+    def read_and_note(self, event_id, window_id):
+        rosters = self.reader(event_id, window_id)
         content = repr([(r.get("rank"), r.get("points"), r.get("games")) for r in rosters])
-        boards[(str(event_id), str(window_id))] = (len(rosters), hashlib.sha1(content.encode()).hexdigest()[:8])
+        self.boards[(str(event_id), str(window_id))] = (len(rosters), hashlib.sha1(content.encode()).hexdigest()[:8])
         return rosters
 
-    kept = functools.lru_cache(maxsize=256)(read_and_note)
+    def price_cutoff(self, cutoff: str, ids: list, clock: str | None = None) -> dict:
+        """The cups of one cutoff (their ids, in the order they started),
+        priced from its model: their forecasts and what the run counts. Given
+        a `clock` (Paris time), the model and the replays read only the rows
+        the database held by then."""
+        skipped, refused, replayed = Counter(), Counter(), Counter()
+        models = self.models if clock is None else Models(
+            self.conn, [c for c in self.loaded if created_before(c, clock)], self.key, self.cache)
+        noted, built, read_before = set(self.boards), models.built, models.read
 
-    def read(event_id, window_id):
-        replayed["reads"] += 1
-        return kept(event_id, window_id)
+        def read(event_id, window_id):
+            replayed["reads"] += 1
+            return self.kept(event_id, window_id)
 
-    rescore.rosters_of = read
-    began = time.time()
-    try:
-        for n, cutoff in enumerate(sorted(targets), 1):
+        rescore.rosters_of = read
+        try:
             model = models.get(cutoff)
-            sizes[cutoff] = {"tournaments": model["source"]["tournaments"], "cups": len(targets[cutoff])}
-            quality = model.get("quality") or {}
-            bands = bands or {"generated": quality.get("generated"), "from": quality.get("from")}
-            before = len(pairs)
-            for comp in sorted(targets[cutoff], key=lambda c: (str(c.get("start_time")), c["id"])):
-                pairs += price(conn, model, comp, catalogue, cutoff, starts, skipped, refused, replayed)
-            if progress:
-                print(f"  {cutoff[:16]:<16}  model of {model['source']['tournaments']:>5} tournaments, "
-                      f"{len(targets[cutoff]):>3} cups, {len(pairs) - before:>4} forecasts"
-                      f"   ({n}/{len(targets)}, {time.time() - began:.0f} s)", flush=True)
-            del model
-    finally:
-        rescore.rosters_of = reader
-    models.prune()
+            pairs = []
+            for comp_id in ids:
+                pairs += price(self.conn, model, self.comps[comp_id], self.catalogue, cutoff, self.starts,
+                               skipped, refused, replayed, clock)
+        finally:
+            rescore.rosters_of = self.reader
+        quality = model.get("quality") or {}
+        return {"cutoff": cutoff, "pairs": pairs, "skipped": skipped, "refused": refused,
+                "size": {"tournaments": model["source"]["tournaments"], "cups": len(ids)},
+                "bands": {"generated": quality.get("generated"), "from": quality.get("from")},
+                "replayed": {"cups": replayed["cups"], "short": replayed["short"]},
+                "boards": {board: found for board, found in self.boards.items() if board not in noted},
+                "built": models.built - built, "read": models.read - read_before, "key": models.key}
+
+
+# The share of a worker process of `cold`, set up once by `_start`.
+_SHARE: Share | None = None
+
+
+def _start(path: str, live: bool, catalogue: dict, boards: str, cache: str | None, key: str,
+           variant: tuple | None) -> None:
+    """A worker of `cold`: its own read-only connection, the raw pages the
+    parent reads, and the variant, if any, applied by itself for good: the
+    text the parent read (its path and bytes), not the file as it is now."""
+    global _SHARE
+    rescore.RAW = boards
+    if variant:
+        Variant(*variant).load().apply()
+    conn = open_read_only(path, live)
+    conn.row_factory = sqlite3.Row
+    with contextlib.redirect_stdout(io.StringIO()):
+        comps = export_model.load_competitions(conn)
+    _SHARE = Share(conn, comps, catalogue, cache, key)
+
+
+def _price(task: tuple) -> dict:
+    return _SHARE.price_cutoff(*task)
+
+
+def cold(conn, since: str, until: str, catalogue: dict, cache: str | None, key: str,
+         by: str = "update", progress: bool = True, updates: tuple = UPDATES,
+         jobs: int = 1, database: tuple | None = None, variant: Variant | None = None,
+         served: list | None = None, prune: bool = True) -> dict:
+    """Every cup that started in [since, until) and finished, priced from the
+    model before it (see `cutoff_of`). {"pairs", "skipped", "refused",
+    "models", "cups", "built", "read", "model_key", "replays", "bands",
+    "seconds"}.
+
+    With `jobs` above one the cutoffs are priced in that many processes, each
+    opening `database` ((path, live), as `open_read_only` takes them) for
+    itself and reading the raw pages `rescore.RAW` names; the result is the
+    one a single process gives, in the same order. With a `variant`, the run is
+    the variant's: applied for the whole run, in each process, and its models
+    kept under its own key unless it says it leaves them alone. With
+    `by="published"`, each cup reads the model the page served when it started
+    (`served`, the commit times of its model.json), rebuilt from the rows the
+    database held then, over by then: a cup the page priced from a model built
+    before the database dated its rows (CREATED_SINCE) is left out, and counted.
+    With `prune`, the models of other keys CACHE_DAYS old leave the cache after
+    the run, but for the keys it read or built (a published run reads each
+    model under a key of its own); a run beside another of another key (a
+    variant's) keeps them.
+    """
+    began = time.time()
+    if variant is not None:
+        key = variant.key(key)
+    with variant.applied() if variant is not None else contextlib.nullcontext():
+        comps = export_model.load_competitions(conn)
+        targets: dict = {}
+        early = Counter()
+        for comp in comps:
+            day = str(comp.get("start_time") or "")[:10]
+            if since <= day < until:
+                try:
+                    cutoff = cutoff_of(str(comp.get("start_time") or ""), by, updates, served)
+                except ValueError:
+                    early["cups started before the first model the page served"] += 1
+                    continue
+                if by == "published" and cutoff < CREATED_SINCE:
+                    early["cups the page priced from a model built before the database dated its rows"] += 1
+                    continue
+                targets.setdefault(cutoff, []).append(comp)
+        tasks = [(cutoff, [c["id"] for c in sorted(targets[cutoff], key=lambda c: (str(c.get("start_time")),
+                                                                                   c["id"]))],
+                  paris_of(cutoff) if by == "published" else None)
+                 for cutoff in sorted(targets)]
+        models = Models(conn, comps, key, cache)
+        pairs, skipped, refused, sizes, replayed, bands, boards = [], Counter(early), Counter(), {}, Counter(), None, {}
+        built = read = 0
+        used = {models.key}
+        with contextlib.ExitStack() as stack:
+            if jobs > 1 and len(tasks) > 1:
+                if not database:
+                    raise ValueError("several jobs need the database's path, to open it in each")
+                workers = min(jobs_allowed(jobs)[0], len(tasks))
+                if progress:
+                    print(f"  {workers} processes for {len(tasks)} cutoffs, each with its own read-only connection",
+                          flush=True)
+                # Spawned, not forked: a worker starts from the code as it is on
+                # disk and applies the variant itself, never twice.
+                pool = stack.enter_context(ProcessPoolExecutor(
+                    max_workers=workers, mp_context=multiprocessing.get_context("spawn"),
+                    initializer=_start, initargs=(database[0], database[1], catalogue, rescore.RAW, cache, key,
+                                                  (variant.path, variant.source) if variant is not None else None)))
+                done = pool.map(_price, tasks)
+            else:
+                share = Share(conn, comps, catalogue, cache, key)
+                done = (share.price_cutoff(*task) for task in tasks)
+            for n, part in enumerate(done, 1):
+                cutoff = part["cutoff"]
+                pairs += part["pairs"]
+                skipped.update(part["skipped"])
+                refused.update(part["refused"])
+                sizes[cutoff] = part["size"]
+                bands = bands or part["bands"]
+                replayed.update(part["replayed"])
+                boards.update(part["boards"])
+                built, read = built + part["built"], read + part["read"]
+                used.add(part["key"])
+                if progress:
+                    print(f"  {cutoff[:16]:<16}  model of {part['size']['tournaments']:>5} tournaments, "
+                          f"{part['size']['cups']:>3} cups, {len(part['pairs']):>4} forecasts"
+                          f"   ({n}/{len(tasks)}, {time.time() - began:.0f} s)", flush=True)
+    if prune:
+        models.prune(keep=used)
     listed = sorted(f"{event}|{window}|{n}|{sha}" for (event, window), (n, sha) in boards.items())
     return {"pairs": pairs, "skipped": skipped, "refused": refused, "models": sizes,
-            "cups": sum(len(v) for v in targets.values()), "built": models.built, "read": models.read,
+            "cups": sum(len(v) for v in targets.values()) + sum(early.values()), "built": built, "read": read,
             "model_key": models.key,
             "replays": {"cups": replayed["cups"], "cups_short_of_boards": replayed["short"],
                         "boards_asked": len(listed), "boards_with_pages": sum(1 for n, _ in boards.values() if n),
-                        "digest": hashlib.sha1("\n".join(listed).encode()).hexdigest()[:16]},
-            "bands": bands}
+                        "digest": hashlib.sha1("\n".join(listed).encode()).hexdigest()[:16],
+                        "boards": listed},
+            "bands": bands, "seconds": time.time() - began}
+
+
+def same_model(conn, cutoff: str, cache: str | None, key: str, variant: Variant) -> bool:
+    """Does the variant leave the model of `cutoff` as today's code builds it?
+    Asked of a variant that says so before its run reads today's models: the
+    model is built again with the variant applied, and set against today's."""
+    with contextlib.redirect_stdout(io.StringIO()):
+        plain = Models(conn, export_model.load_competitions(conn), key, cache).get(cutoff)
+        with variant.applied():
+            changed = Models(conn, export_model.load_competitions(conn), key, None).get(cutoff)
+    return plain == changed
 
 
 def argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--cold", action="store_true",
-                        help="the forecast made before each cup (the only bench so far, and the default)")
+                        help="the forecast made before each cup (the default)")
+    parser.add_argument("--live", action="store_true",
+                        help="the forecast the page shows during each cup the live feed followed "
+                             "(analysis/bench_live.py)")
+    parser.add_argument("--arrival", default="feed", metavar="feed|stamp|MINUTES",
+                        help="with --live, when a reading reaches the page: after the feed's pass that could "
+                             "take it (default), at its stamp, or this many minutes after its stamp")
     parser.add_argument("--weeks", type=int, default=0, help="the span, in weeks back from --until")
     parser.add_argument("--days", type=int, default=0, help=f"the span, in days (default {SHORT_DAYS})")
     parser.add_argument("--since", default="", help="the first day (YYYY-MM-DD)")
     parser.add_argument("--until", default="", help="the day after the last (default: today, UTC)")
-    parser.add_argument("--cutoff", choices=("update", "day"), default="update",
-                        help="the model a cup reads: the last daily update's (default), or the "
-                             "tournaments that started before its day")
+    parser.add_argument("--cutoff", choices=("update", "day", "published"), default="update",
+                        help="the model a cup reads: the last daily update's (default), the "
+                             "tournaments that started before its day, or the model the page served then "
+                             "(from the history of --ladder, since %s UTC)" % CREATED_SINCE[:16])
+    parser.add_argument("--ladder", default=LADDER,
+                        help="the page's repository, whose history dates each model.json it served "
+                             "(for --cutoff published)")
     parser.add_argument("--update", type=clocks, default=UPDATES, metavar="HH:MM[,HH:MM]",
                         help=f"the daily updates, Paris time (default {','.join(UPDATES)})")
     parser.add_argument("--db", default="", help="the database (default: the app's)")
@@ -791,7 +1127,39 @@ def argument_parser() -> argparse.ArgumentParser:
                              "(default: data/osirion/leaderboards, where the harvest keeps them)")
     parser.add_argument("--cache", default="", help="where the models are kept ('none': nowhere)")
     parser.add_argument("--json", default="", help="write every forecast, the tables and the biases here")
+    parser.add_argument("--jobs", type=jobs_count, default=1, metavar="N",
+                        help="price the cutoffs in N processes, each with its own connection and models, "
+                             "about 0.5 to 1.4 GB each (default 1; no more than the cutoffs or the processors)")
+    parser.add_argument("--variant", default="", metavar="FILE.py",
+                        help="also price every cup with the replacements FILE.py's apply() makes, and set the "
+                             "two runs against each other (with --json X.json, the variant's goes to "
+                             "X.variant.json)")
+    parser.add_argument("--compare", action="store_true",
+                        help="BASE.json VARIANT.json: set two runs written with --json side by side, forecast "
+                             "against forecast, and measure nothing; the rest of the line goes to "
+                             "analysis/bench_compare.py (its --help)")
     return parser
+
+
+def jobs_allowed(jobs: int) -> tuple[int, str]:
+    """How many of `jobs` processes a run starts at most, and what holds it to
+    fewer ("" when nothing does): the processors the system has, and on
+    Windows the most its pool runs (WINDOWS_JOBS)."""
+    caps = [(os.cpu_count() or 1, "the processors this system has")]
+    if sys.platform == "win32":
+        caps.append((WINDOWS_JOBS, "the most this system runs in one pool"))
+    cap, why = min(caps)
+    return (cap, why) if cap < jobs else (jobs, "")
+
+
+def jobs_count(text: str) -> int:
+    try:
+        jobs = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a number: {text!r}")
+    if jobs < 1:
+        raise argparse.ArgumentTypeError(f"one job at least: {text!r}")
+    return jobs
 
 
 def clocks(text: str) -> tuple:
@@ -843,7 +1211,25 @@ def same_file(a: str, b: str) -> bool:
 
 
 def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else list(argv)
+    if "--compare" in argv:
+        from analysis import bench_compare
+        return bench_compare.main([arg for arg in argv if arg != "--compare"])
     args = argument_parser().parse_args(argv)
+    if args.live:
+        # The live bench has its own loop: what only the cold one does is
+        # refused, not dropped, so that no run passes for what it is not.
+        cold_only = [name for name, asked in (("--cutoff published", args.cutoff == "published"),
+                                              ("--jobs", args.jobs > 1), ("--variant", bool(args.variant)))
+                     if asked]
+        if cold_only:
+            print(f"{', '.join(cold_only)}: the cold bench's, not the live bench's (--live). Nothing measured.")
+            return 2
+        from analysis import bench_live
+        return bench_live.run(args)
+    if args.arrival != "feed":
+        print("--arrival is the live bench's (--live), not the cold bench's. Nothing measured.")
+        return 2
     path = args.db or db.DB_PATH
     if not os.path.exists(path):
         print(f"No database at {path}: nothing measured.")
@@ -855,7 +1241,13 @@ def main(argv: list[str] | None = None) -> int:
     boards = os.path.abspath(args.leaderboards or rescore.RAW)
     events = pages_in(boards)
     which = (f"the last daily update online before it ({', '.join(args.update)} Paris time, online "
-             f"{PUBLISH_MINUTES} min later)" if args.cutoff == "update" else "the tournaments started before its day")
+             f"{PUBLISH_MINUTES} min later)" if args.cutoff == "update" else "the tournaments started before its day"
+             if args.cutoff == "day" else "the model.json the page served when it started, rebuilt from the rows "
+             "the database held then")
+    commits = served(args.ladder) if args.cutoff == "published" else None
+    if args.cutoff == "published" and not commits:
+        print(f"No history of model.json in {args.ladder}: nothing measured (--ladder).")
+        return 2
     print(f"Cold bench, cups from {since} to {until} (not included), each priced from the model of {which}")
     print(f"  database {path}; catalogue: {len(catalogue):,} windows"
           + ("" if catalogue else " - every cup is priced off its database row"))
@@ -863,22 +1255,92 @@ def main(argv: list[str] | None = None) -> int:
     if not events:
         print("  WARNING: no raw leaderboard pages there. The replayed tables are off: the cups new in their region\n"
               "  fall back on other rungs, and this run does not compare with one that had the pages (--leaderboards).")
+    variant = None
+    if args.variant:
+        try:
+            variant = Variant(args.variant)
+        except (OSError, ValueError, SyntaxError) as exc:
+            print(f"No variant from {args.variant}: {exc}")
+            return 2
+    jobs, why = jobs_allowed(args.jobs)
+    if why:
+        print(f"  --jobs {args.jobs}: {jobs} processes at most, {why}")
     key = model_key(path)
-    conn = open_read_only(path, live=same_file(path, str(db.DB_PATH)))
+    live = same_file(path, str(db.DB_PATH))
+    conn = open_read_only(path, live=live)
     conn.row_factory = sqlite3.Row
-    began = time.time()
     kept_boards, rescore.RAW = rescore.RAW, boards
+    heading = f"cold: the forecast before each cup ({since} to {until}, cutoff: {args.cutoff})"
+    read = dict(since=since, until=until, path=path, catalogue=catalogue, events=events, commits=commits)
+    payloads = []
     try:
-        run = cold(conn, since, until, catalogue, cache, key, args.cutoff, updates=args.update)
+        # Today's run is written as soon as it is over: the variant's, which
+        # runs code from elsewhere, may fail, exit or be refused without losing it.
+        run = cold(conn, since, until, catalogue, cache, key, args.cutoff, updates=args.update,
+                   jobs=jobs, database=(path, live), served=commits, prune=variant is None)
+        tables = shown(run, "", heading, cache)
+        if args.json or variant is not None:
+            payloads.append(run_json(args, run, tables, **read))
+            if args.json:
+                write_json(payloads[-1], args.json)
+        if variant is not None:
+            alone = f"today's run alone is written ({args.json})" if args.json else "today's run alone is shown"
+            # A variant's file of an earlier run is not left beside this one.
+            if args.json and os.path.exists(variant_json(args.json)):
+                os.remove(variant_json(args.json))
+            try:
+                last = max(run["models"], default="")
+                if last and not variant.changes_model and not same_model(conn, last, cache, key, variant):
+                    print(f"\n{variant.path} says it leaves the models alone (CHANGES_MODEL = False), but the model "
+                          f"of {last} is not the same with it: no run of the variant, {alone}.")
+                    return 2
+                print(f"\nThe same cups with the variant {variant.path} (SHA-1 {variant.sha1[:12]}), "
+                      + ("its own models" if variant.changes_model else "today's models"))
+                run = cold(conn, since, until, catalogue, cache, key, args.cutoff, updates=args.update,
+                           jobs=jobs, database=(path, live), variant=variant, served=commits, prune=False)
+                tables = shown(run, "variant: ", heading, cache)
+                payloads.append(run_json(args, run, tables, variant=variant, **read))
+            except (Exception, SystemExit) as exc:
+                traceback.print_exc()
+                print(f"\nThe variant's run failed ({type(exc).__name__}: {exc}): {alone}.")
+                return 1
+            if args.json:
+                write_json(payloads[-1], variant_json(args.json))
     finally:
         rescore.RAW = kept_boards
         conn.close()
+    if len(payloads) == 2:
+        try:
+            from analysis import bench_compare
+        except ImportError:
+            print("\nanalysis/bench_compare.py is not here: the two runs are written, not set against each other.")
+        else:
+            # One launch reads one database, catalogue and folder of pages, but a
+            # variant may read fewer of the boards: the comparison then says so
+            # rather than set the two runs side by side unasked.
+            try:
+                result = bench_compare.compare(payloads[0], payloads[1])
+            except ValueError as exc:
+                print(f"\nThe two runs are not set against each other: {exc}")
+                # Only what one run lacks may go unchecked; a value that differs never.
+                lacking = sorted(set(re.findall(r"--unchecked (\w+)", str(exc))))
+                if args.json and lacking:
+                    print(f'  python -m analysis.bench --compare "{args.json}" "{variant_json(args.json)}" '
+                          f"--unchecked {','.join(lacking)} compares them all the same")
+                return 2
+            bench_compare.print_report(result)
+    return 0
+
+
+def shown(run: dict, mark: str, heading: str, cache: str | None) -> tuple[dict, list[dict]]:
+    """Print what a run counted and its tables, `mark` before the variant's;
+    the tables and the biases, as `report` gives them."""
     pairs = run["pairs"]
-    print(f"\n{run['cups']} cups, {len(pairs)} forecasts, {run['built']} models built and "
-          f"{run['read']} read from {cache or 'nowhere'}, in {time.time() - began:.0f} s")
+    print(f"\n{mark}{run['cups']} cups, {len(pairs)} forecasts, {run['built']} models built and "
+          f"{run['read']} read from {cache or 'nowhere'}, in {run['seconds']:.0f} s")
     replays = run["replays"]
-    print(f"Replayed tables on {replays['cups']} cups; {replays['cups_short_of_boards']} more asked for one and found "
-          f"fewer than two usable boards. Boards: {replays['boards_with_pages']} with pages of "
+    print(f"Replayed tables on {replays['cups']} cups; {replays['cups_short_of_boards']} more asked for one and "
+          f"found fewer than two usable boards. Boards: {replays['boards_with_pages']} with pages of "
           f"{replays['boards_asked']} asked (digest {replays['digest']}).")
     if replays["boards_asked"] and not replays["boards_with_pages"]:
         print("WARNING: not one board the replays asked for had pages: the replayed tables are off in this run.")
@@ -890,30 +1352,52 @@ def main(argv: list[str] | None = None) -> int:
             print(f"\n{title}")
             for why, n in found.most_common():
                 print(f"  {n:>5}  {why}")
-    found, leaning = report(pairs, f"cold: the forecast before each cup ({since} to {until}, "
-                                   f"cutoff: {args.cutoff})")
-    if args.json:
-        payload = {
-            "generated": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%MZ"),
-            "bench": "cold", "since": since, "until": until, "cutoff": args.cutoff,
-            "update": {"paris": list(args.update), "online_after_minutes": PUBLISH_MINUTES}
-            if args.cutoff == "update" else None,
-            "database": {"sha1": file_sha1(path), "bytes": os.path.getsize(path),
-                         **({"wal_sha1": file_sha1(path + "-wal"), "wal_bytes": os.path.getsize(path + "-wal")}
-                            if os.path.exists(path + "-wal") and os.path.getsize(path + "-wal") else {})},
-            "catalogue": {"windows": len(catalogue),
-                          "files": len(glob.glob(os.path.join(args.catalogue, "*.json.gz")))},
-            "leaderboards": {"events": events}, "replays": run["replays"], "bands": run["bands"],
-            "model_key": run["model_key"], "ranks": list(RANKS), "cups": run["cups"],
-            "models": run["models"], "skipped": dict(run["skipped"]), "refused": dict(run["refused"]),
-            "all": coldbench.summary(pairs) if pairs else None,
-            "at_cut": coldbench.summary([p for p in pairs if p["at_cut"]]) if pairs else None,
-            "tables": found, "biases": leaning, "pairs": pairs,
-        }
-        with open(args.json, "w", encoding="utf-8") as fh:
-            json.dump(payload, fh, ensure_ascii=False, indent=1)
-        print(f"\nWrote {args.json}")
-    return 0
+    return report(pairs, mark + heading)
+
+
+def run_json(args, run: dict, tables: tuple, since: str, until: str, path: str, catalogue: dict, events: int,
+             commits: list | None, variant: Variant | None = None) -> dict:
+    """What `--json` writes of a run, today's or a variant's: the same fields
+    for both, the database, catalogue and pages it read among them, so that
+    the two can be set against each other."""
+    found, leaning = tables
+    pairs = run["pairs"]
+    payload = {
+        "generated": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%MZ"),
+        "bench": "cold", "since": since, "until": until, "cutoff": args.cutoff,
+        "update": {"paris": list(args.update), "online_after_minutes": PUBLISH_MINUTES}
+        if args.cutoff == "update" else None,
+        "database": {"sha1": file_sha1(path), "bytes": os.path.getsize(path),
+                     **({"wal_sha1": file_sha1(path + "-wal"), "wal_bytes": os.path.getsize(path + "-wal")}
+                        if os.path.exists(path + "-wal") and os.path.getsize(path + "-wal") else {})},
+        "catalogue": {"windows": len(catalogue),
+                      "files": len(glob.glob(os.path.join(args.catalogue, "*.json.gz"))),
+                      "sha1": catalogue_sha1(args.catalogue)},
+        "leaderboards": {"events": events}, "replays": run["replays"], "bands": run["bands"],
+        "model_key": run["model_key"], "ranks": list(RANKS), "cups": run["cups"],
+        "models": run["models"], "skipped": dict(run["skipped"]), "refused": dict(run["refused"]),
+        "all": coldbench.summary(pairs) if pairs else None,
+        "at_cut": coldbench.summary([p for p in pairs if p["at_cut"]]) if pairs else None,
+        "tables": found, "biases": leaning, "pairs": pairs,
+    }
+    if commits:
+        payload["published"] = {"ladder": os.path.abspath(args.ladder), "commits": len(commits),
+                                "since": CREATED_SINCE, "served": sorted(run["models"])}
+    if variant is not None:
+        payload["variant"] = {"path": variant.path, "sha1": variant.sha1}
+    return payload
+
+
+def write_json(payload: dict, path: str) -> None:
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, ensure_ascii=False, indent=1)
+    print(f"\nWrote {path}")
+
+
+def variant_json(path: str) -> str:
+    """Where the variant's run is written beside `path`: out.json -> out.variant.json."""
+    root, ext = os.path.splitext(path)
+    return f"{root}.variant{ext}"
 
 
 if __name__ == "__main__":

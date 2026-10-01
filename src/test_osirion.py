@@ -1148,6 +1148,1181 @@ def main() -> int:
                - sum(abs(e + 10) for e in errors),
                tuple(round(v, 2) for v in bench.gain_of([-30, -10, -5, 40, 80]))))
 
+    print("\n18. The live bench: each cup the feed followed, replayed reading by reading")
+    import importlib.util
+    if any(importlib.util.find_spec(p) is None for p in ("numpy", "pandas", "scipy")):
+        print("   (skipped: analysis/ needs its own requirements, see analysis/requirements.txt)")
+    else:
+        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        from analysis import bench, bench_live
+        live_db = os.path.join(workdir, "live.db")
+        db.init_db(live_db)
+        worth = {r: round(300 * (r / 20) ** -0.3, 1) for r in (1, 10, 25, 100, 250, 500, 1000, 2500, 7500, 10000)}
+
+        def held_cup(conn, family, day, field, ranks, scale=1.0, hour=18):
+            cid = db.create_competition(conn, f"{family} EU {day}", region="EU", team_mode="Solo",
+                                        game_mode="Battle Royale", start_time=f"{day} {hour:02d}:00",
+                                        end_time=f"{day} {hour + 3:02d}:00", ranks=sorted(ranks), max_games=10,
+                                        scoring=table)
+            db.update_competition(conn, cid, family=family, field_size=field, finished_at=f"{day} {hour + 3:02d}:00")
+            db.set_finals(conn, cid, {r: round(worth[r] * scale, 1) for r in ranks})
+            return cid
+
+        def followed(conn, cid, read, pages=None, ranked=None):
+            # A reading every twelve minutes, the board short of its final by
+            # the share of the window still to play, and final past the close.
+            for minute in range(12, 216, 12):
+                at = datetime(2026, 7, 20, 18, 0) + timedelta(minutes=minute)
+                db.add_snapshot(conn, cid, ts=at.strftime("%Y-%m-%d %H:%M"),
+                                points={r: round(worth[r] * min(1.0, minute / 190), 1) for r in read},
+                                note="live feed" + (" · final" if minute >= 180 else ""),
+                                games=min(10, 1 + minute // 18), pages=pages, ranked=ranked)
+
+        small = (1, 10, 25, 100, 250, 500, 1000)
+        deep = (10, 25, 100, 250, 500, 1000, 2500, 7500, 10000)
+        with db.session(live_db) as conn:
+            for day in ("2026-07-06", "2026-07-13"):
+                held_cup(conn, "Live Cup", day, 3000, small)
+                held_cup(conn, "Big Cup", day, 15000, deep)
+            # An edition over after the update that prices the evening: no
+            # forecast made before the evening could read it.
+            held_cup(conn, "Live Cup", "2026-07-20", 3000, small, scale=2.0, hour=14)
+            target = held_cup(conn, "Live Cup", "2026-07-20", 3000, small)
+            followed(conn, target, (1, 10, 100, 1000))
+            # A field of fifteen thousand counted exactly past the API's last
+            # page: the page reads the 7,500th as the casual half, live.py no
+            # deeper than q = 0.49.
+            big = held_cup(conn, "Big Cup", "2026-07-20", 15000, deep)
+            followed(conn, big, (100, 7500), pages=100, ranked=15000)
+        key = bench.model_key(live_db)
+
+        def replayed(arrival=None):
+            # Left out, the arrival is the bench's own default.
+            with db.session(live_db) as conn:
+                return bench_live.measure(conn, "2026-07-20", "2026-07-21", {}, None, key, progress=False,
+                                          **({"arrival": arrival} if arrival else {}))
+
+        def at(rows, point):
+            return {(r["id"], r["rank"]): r["forecast"] for r in rows if r["point"] == point}
+
+        first, second = replayed(), replayed()
+        rows = first["rows"]
+        check("the feed's cups are replayed at the seven points of their session, twice the same",
+              (2, True, ["20 %", "40 %", "60 %", "80 %", "100 %", "+10 min", "+20 min"]),
+              (first["cups"], json.dumps(rows, sort_keys=True) == json.dumps(second["rows"], sort_keys=True),
+               sorted({r["point"] for r in rows}, key=[p for p, _, _ in bench_live.POINTS].index)))
+        with db.session(live_db) as conn:
+            cold = {(p["id"], p["rank"]): p["forecast"]
+                    for p in bench.cold(conn, "2026-07-20", "2026-07-21", {}, None, key, progress=False)["pairs"]}
+        mine = [r for r in rows if r["id"] == target]
+        check("each cup starts from the model online before it, and its cold forecast is the cold bench's",
+              ({bench.cutoff_of("2026-07-20 18:00:00")}, True, True),
+              ({r["model"] for r in rows},
+               all(r["cold"] == cold[(r["id"], r["rank"])] for r in mine if (r["id"], r["rank"]) in cold),
+               all(r["cold"] < 1.5 * worth[r["rank"]] for r in mine if r["cold"])))
+        # One every twelve minutes. Known at its stamp, the one stamped at 36
+        # minutes is in at a fifth of the session; the one at 180, called
+        # final, only past the close. On the feed's passes - the board is read
+        # deeper than its first page, so on the ten-minute marks - each lands
+        # two minutes after the next mark: the one at 36 at 42, the one at 72
+        # at 82, the one at 192 at 202.
+        stamped = [r for r in replayed("stamp")["rows"] if r["id"] == target]
+        check("a point reads the readings that had reached the page by then and no other: at their stamp, "
+              "or after the feed's pass, the default",
+              ([3, 6, 9, 12, 14, 15, 16], [2, 5, 8, 11, 14, 15, 15], "feed"),
+              tuple([next(r["snapshots"] for r in got if r["point"] == p) for p, _, _ in bench_live.POINTS]
+                    for got in (stamped, mine)) + (bench.argument_parser().parse_args(["--live"]).arrival,))
+        opens, closes = datetime(2026, 7, 20, 18, 0), datetime(2026, 7, 20, 21, 0)
+        check("a reading lands two minutes after the first pass that could read it: a ten-minute mark, or a "
+              "five-minute one for the first page from twenty minutes before the close",
+              [22, 42, 72, 152, 167, 172, 182, 34, 39],
+              [bench_live.landed(opens, closes, minute, ranks, arrival) for minute, ranks, arrival in (
+                  (12, (1, 1000), "feed"), (34, (10,), "feed"), (70, (10,), "feed"), (143, (10,), "feed"),
+                  (163, (10,), "feed"), (163, (10, 1000), "feed"), (176, (1, 100), "feed"),
+                  (34, (10,), "stamp"), (34, (10,), 5))])
+
+        # A reading planted at 170 minutes and called final - the feed only
+        # says so once the window is over - must move nothing before the close.
+        with db.session(live_db) as conn:
+            db.add_snapshot(conn, target, ts="2026-07-20 20:50", points={10: 5 * worth[10]},
+                            note="live feed · final", games=10)
+        planted = replayed()["rows"]
+        early = all(at(rows, p) == at(planted, p) for p in ("20 %", "40 %", "60 %", "80 %", "100 %"))
+        check("a reading moves no answer before it was taken, a final one none before the close",
+              (True, True), (early, at(rows, "+10 min") != at(planted, "+10 min")))
+        kept = bench_live.available
+        try:
+            bench_live.available = lambda snapshots, minute, close, strict=True: list(snapshots)
+            reads_all = replayed()["rows"]
+            bench_live.available = lambda snapshots, minute, close, strict=True: kept(snapshots, minute, close, False)
+            reads_final = replayed()["rows"]
+        finally:
+            bench_live.available = kept
+        check("a replay that read later readings, or a final one before the close, is caught",
+              (False, False), (at(reads_all, "20 %") == at(planted, "20 %"),
+                               at(reads_final, "100 %") == at(planted, "100 %")))
+
+        # The checks below price the one cup at a time, off one model.
+        import export_model
+        from collections import Counter
+        cutoff = bench.cutoff_of("2026-07-20 18:00:00")
+        with db.session(live_db) as conn:
+            model = bench.Models(conn, export_model.load_competitions(conn), key, None).get(cutoff)
+
+        def priced(arrival="feed", early=None):
+            with db.session(live_db) as conn:
+                comp = next(c for c in export_model.load_competitions(conn) if c["id"] == target)
+                return bench_live.price_cup(conn, model, comp, {}, cutoff, Counter(), Counter(), arrival=arrival,
+                                            early=early)[0]
+
+        def plant(minute, points):
+            stamp = opens + timedelta(minutes=minute)
+            with db.session(live_db) as conn:
+                return db.add_snapshot(conn, target, ts=stamp.strftime("%Y-%m-%d %H:%M"), points=points,
+                                       note="live feed", games=min(10, 1 + max(0, minute) // 18))
+
+        def unplant(sid):
+            with db.session(live_db) as conn:
+                db.delete_snapshot(conn, sid)
+
+        # A reading stamped a minute after each point, not final, moves
+        # nothing at that point, whether it lands at its stamp or after the
+        # feed's pass. Taken a minute early, it moves every one of them.
+        unmoved, moved = [], []
+        for label, share, past in bench_live.POINTS:
+            minute = 180 * share if share is not None else 180 + past
+            before = {a: at(priced(a), label) for a in ("feed", "stamp")}
+            sid = plant(round(minute) + 1, {10: round(8 * worth[10], 1)})
+            try:
+                unmoved.append(all(at(priced(a), label) == before[a] for a in before))
+                bench_live.available = lambda snapshots, minute, close, strict=True: \
+                    kept(snapshots, minute + 1, close, strict)
+                moved.append(at(priced("stamp"), label) != before["stamp"])
+            finally:
+                bench_live.available = kept
+                unplant(sid)
+        check("a reading stamped a minute after a point moves nothing there, and would move it if read early",
+              ([True] * 7, [True] * 7), (unmoved, moved))
+
+        # Two minutes before a point outside the endgame, a board stamped then
+        # has not been read yet: the feed's next pass is on the ten-minute mark.
+        late = []
+        for label, minute in (("20 %", 34), ("60 %", 106), ("80 %", 142)):
+            before = {a: at(priced(a), label) for a in ("feed", "stamp")}
+            sid = plant(minute, {10: round(8 * worth[10], 1)})
+            try:
+                late.append((at(priced("feed"), label) == before["feed"],
+                             at(priced("stamp"), label) != before["stamp"]))
+            finally:
+                unplant(sid)
+        check("a reading stamped two minutes before a point outside the endgame has not reached the page on the "
+              "feed's passes, and has at its stamp", [(True, True)] * 3, late)
+
+        # Outside the endgame the page waits for the ten-minute pass, whatever
+        # the ranks: a board stamped a minute after a mark is in two minutes
+        # after the next one, not sooner. Twenty-five minutes before the close
+        # the quick pass is not on yet, so a first-page board stamped then
+        # waits for the ten-minute mark as well, not the five-minute one.
+        sids = [plant(61, {10: round(8 * worth[10], 1)}), plant(155, {10: round(8 * worth[10], 1)})]
+        try:
+            with db.session(live_db) as conn:
+                held = {a: bench_live.snapshots_of(conn, target, opens, closes, a) for a in ("feed", "stamp")}
+        finally:
+            for sid in sids:
+                unplant(sid)
+        first_in = tuple(tuple(next((m for m in range(241) if any(s["id"] == sid for s in
+                                                                  bench_live.available(held[a], m, 180))), None)
+                               for sid in sids) for a in ("feed", "stamp"))
+        check("a board stamped a minute after a ten-minute mark is first held two minutes after the next one, and a "
+              "first-page board twenty-five minutes before the close on the ten-minute mark",
+              ((72, 162), (61, 155)), first_in)
+
+        # A reading stamped two days before the window opened belongs to
+        # another window: left out, and counted.
+        before, early = priced(), Counter()
+        sid = plant(-2880, {10: round(8 * worth[10], 1)})
+        try:
+            after = priced(early=early)
+        finally:
+            unplant(sid)
+        check("a reading stamped long before the window opened is left out and counted",
+              (True, 1), (after == before, sum(early.values())))
+
+        # The tournament's row is given the feed's last count after the cup:
+        # the field the page read is never that one.
+        before = {a: priced(a) for a in ("feed", "stamp")}
+        with db.session(live_db) as conn:
+            db.update_competition(conn, target, field_size=9000)
+        try:
+            after = {a: priced(a) for a in ("feed", "stamp")}
+        finally:
+            with db.session(live_db) as conn:
+                db.update_competition(conn, target, field_size=3000)
+        check("a field written to the tournament after the cup moves nothing and is never read as typed",
+              (True, False), (after == before, any(r["field_from"] == "typed" or r["field"] == 9000
+                                                   for got in after.values() for r in got)))
+
+        # A final deeper than any reading, the 2,500th, is known only once the
+        # cup is over: no other rank's forecast moves, and before the board
+        # gives a count the field is the one the model guesses - the 3,000
+        # its two editions drew - never the deepest rank of the finals.
+        before = {a: priced(a) for a in ("feed", "stamp")}
+        with db.session(live_db) as conn:
+            db.set_finals(conn, target, {2500: round(worth[2500], 1)})
+        try:
+            after = {a: [r for r in priced(a) if r["rank"] != 2500] for a in ("feed", "stamp")}
+        finally:
+            with db.session(live_db) as conn:
+                db.set_finals(conn, target, {2500: None})
+        check("a final deeper than any reading moves no other rank's forecast, and the field guessed is the model's",
+              (True, {3000}), (after == before, {r["field"] for got in after.values() for r in got
+                                                 if r["field_from"] == "guessed"}))
+
+        # The board's count grows through the evening: at 40 % the field
+        # counted is the last count that had reached the page.
+        with db.session(live_db) as conn:
+            for sid, ts in conn.execute("SELECT id, ts FROM snapshot WHERE competition_id = ?", (target,)).fetchall():
+                minute = (datetime.fromisoformat(str(ts)) - opens).total_seconds() / 60
+                conn.execute("UPDATE snapshot SET ranked = ? WHERE id = ?", (int(2000 + 10 * minute), sid))
+        counted = {a: next(r for r in priced(a) if r["point"] == "40 %") for a in ("stamp", "feed")}
+        check("a count that grows through the evening is read as it stood when the point's last reading landed",
+              (("counted", 2720), ("counted", 2600)),
+              tuple((counted[a]["field_from"], counted[a]["field"]) for a in ("stamp", "feed")))
+
+        # With no count, only the pages the feed walked - one more every
+        # twelve minutes - the field is a hundred a page, the last half full,
+        # off the last reading that had landed: seven pages in stamp, six in
+        # the feed, never the eighteen of the evening's last.
+        with db.session(live_db) as conn:
+            for sid, ts in conn.execute("SELECT id, ts FROM snapshot WHERE competition_id = ?", (target,)).fetchall():
+                minute = (datetime.fromisoformat(str(ts)) - opens).total_seconds() / 60
+                conn.execute("UPDATE snapshot SET pages = ?, ranked = 0 WHERE id = ?", (1 + int(minute) // 12, sid))
+        counted = {a: next(r for r in priced(a) if r["point"] == "40 %") for a in ("stamp", "feed")}
+        check("pages that grow through the evening with no count are read as they stood when the last reading landed",
+              (("counted", 650), ("counted", 550)),
+              tuple((counted[a]["field_from"], counted[a]["field"]) for a in ("stamp", "feed")))
+
+        # The cup is marked whatever its ranks; a forecast where the two
+        # depths move it - the 7,500th, read past q = 0.49, and the ranks
+        # priced off it, but not the 100th, read itself.
+        flagged = [r for r in rows if r["id"] == big and r["rank"] == 7500 and r["point"] in ("60 %", "80 %")]
+        plain = [r for r in rows if r["id"] == target]
+        check("where live.py reads a counted field of 15,000 at its ceiling and the page does not, the forecast "
+              "is flagged with the page's own beside it",
+              (2, True, True, False, (["ceiling"], []), 0),
+              (len(flagged), all("ceiling" in r["flags"] for r in flagged),
+               all(r["page_forecast"] and r["page_forecast"] != r["forecast"] for r in flagged),
+               any(r["flags"] for r in plain),
+               tuple(next(line["reasons"] for line in first["lines"] if line["id"] == cid) for cid in (big, target)),
+               sum(1 for r in rows if "ceiling" in r["flags"] and r["rank"] == 100)))
+
+    print("\n19. The cold bench in several processes, and a variant measured beside today's code")
+    if any(importlib.util.find_spec(p) is None for p in ("numpy", "pandas", "scipy")):
+        print("   (skipped: analysis/ needs its own requirements, see analysis/requirements.txt)")
+    else:
+        import hashlib
+        import types
+        import analysis
+        from analysis import bench
+        variants = os.path.join(workdir, "variants")
+        os.makedirs(variants, exist_ok=True)
+
+        def variant_file(name, body):
+            path = os.path.join(variants, name)
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(body)
+            return path
+
+        identity = variant_file("identity.py", "def apply():\n    return None\n")
+        planted_body = (
+            "import export_model\n\n"
+            "def apply():\n"
+            "    plain = export_model.predict_from_model\n\n"
+            "    def planted(model, t):\n"
+            "        got = plain(model, t)\n"
+            "        if got and got.get('value'):\n"
+            "            got = dict(got, **{k: got[k] * 1.01 for k in ('value', 'low', 'high') if got.get(k)})\n"
+            "        return got\n\n"
+            "    export_model.predict_from_model = planted\n"
+            "    return lambda: setattr(export_model, 'predict_from_model', plain)\n")
+        planted = variant_file("planted.py", planted_body)
+        pricing_only = variant_file("pricing_only.py", "CHANGES_MODEL = False\n" + planted_body)
+        # Says it leaves the models alone, and marks every model it builds.
+        liar = variant_file("liar.py", (
+            "import export_model\n\nCHANGES_MODEL = False\n\n"
+            "def apply():\n"
+            "    plain = export_model.build_model\n"
+            "    export_model.build_model = lambda *a, **k: dict(plain(*a, **k), marked=True)\n"
+            "    return lambda: setattr(export_model, 'build_model', plain)\n"))
+        # Makes its replacement as it is imported, with nothing left for apply().
+        on_import = variant_file("on_import.py", (
+            "import export_model\n\n"
+            "plain = export_model.predict_from_model\n\n\n"
+            "def planted(model, t):\n"
+            "    got = plain(model, t)\n"
+            "    if got and got.get('value'):\n"
+            "        got = dict(got, **{k: got[k] * 1.01 for k in ('value', 'low', 'high') if got.get(k)})\n"
+            "    return got\n\n\n"
+            "export_model.predict_from_model = planted\n\n\n"
+            "def apply():\n"
+            "    return None\n"))
+        failing = variant_file("failing.py", (
+            "import export_model\n\n"
+            "def apply():\n"
+            "    plain = export_model.predict_from_model\n\n"
+            "    def failing(model, t):\n"
+            "        raise RuntimeError('this variant fails')\n\n"
+            "    export_model.predict_from_model = failing\n"
+            "    return lambda: setattr(export_model, 'predict_from_model', plain)\n"))
+        # Leave the process instead of failing, as they are run or applied.
+        exits_on_import = variant_file("exits_on_import.py", (
+            "import sys\n\nsys.exit(0)\n\n\ndef apply():\n    return None\n"))
+        exits_in_apply = variant_file("exits_in_apply.py", "import sys\n\n\ndef apply():\n    sys.exit(0)\n")
+        # Makes its replacement in apply(), with nothing to put it back.
+        twice = variant_file("twice.py", "CHANGES_MODEL = False\n" + planted_body.replace(
+            "    return lambda: setattr(export_model, 'predict_from_model', plain)\n", "    return None\n"))
+
+        # bench_compare is measured on its own; here a stand-in records what
+        # the bench hands it.
+        handed = []
+        stand_in = types.ModuleType("analysis.bench_compare")
+        stand_in.compare = lambda a, b: handed.append((a, b)) or {"pairs": len(a["pairs"])}
+        stand_in.print_report = lambda result: print("compared", result["pairs"])
+        saved_module = sys.modules.get("analysis.bench_compare")
+        saved_attr = getattr(analysis, "bench_compare", None)
+        sys.modules["analysis.bench_compare"], analysis.bench_compare = stand_in, stand_in
+        cache = os.path.join(workdir, "bench-cache")
+
+        left_behind = []
+
+        def bench_run(name, *extra, models=None, stale=False):
+            out, printed = os.path.join(workdir, f"{name}.json"), io.StringIO()
+            if stale:
+                # What a variant's run of an earlier day left beside this one.
+                with open(bench.variant_json(out), "w", encoding="utf-8") as fh:
+                    json.dump({"stale": True}, fh)
+            predict = export_model.predict_from_model
+            try:
+                with contextlib.redirect_stdout(printed), contextlib.redirect_stderr(printed):
+                    try:
+                        code = bench.main(["--cold", "--since", "2026-07-13", "--until", "2026-07-21", "--db",
+                                           replay_db, "--catalogue", os.path.join(workdir, "no-catalogue"), "--cache",
+                                           models or cache, "--leaderboards", pages, "--json", out, *extra])
+                    except SystemExit as exc:
+                        # Let through, it would end this suite with its code.
+                        code = f"SystemExit({exc.code}) out of main"
+            finally:
+                # A replacement the run left in this process would reach the next.
+                if export_model.predict_from_model is not predict:
+                    left_behind.append(name)
+                export_model.predict_from_model = predict
+            found = []
+            for path in (out, bench.variant_json(out)):
+                if os.path.exists(path):
+                    with open(path, encoding="utf-8") as fh:
+                        found.append(json.load(fh))
+            return code, found, printed.getvalue()
+
+        def plain(payload):
+            return {k: v for k, v in payload.items() if k != "generated"}
+
+        def ratios_of(run):
+            before, after = run[1]
+            return {round(a["forecast"] / b["forecast"], 9) for a, b in zip(after["pairs"], before["pairs"])}
+
+        def aged(folder, names):
+            month_old = time.time() - 30 * 86400
+            for name in names:
+                os.utime(os.path.join(folder, name), (month_old, month_old))
+
+        def still_aged(folder):
+            """The models neither dropped nor built again since `aged`."""
+            return {name for name in os.listdir(folder)
+                    if os.path.getmtime(os.path.join(folder, name)) < time.time() - 20 * 86400}
+
+        def edited_run(name, jobs):
+            """A variant one percent high, its file edited to five once today's
+            run is over, as one would while waiting on a long run; and the
+            SHA-1 of the file as it is after."""
+            path = variant_file(f"{name}.py", planted_body)
+            plain_cold = bench.cold
+
+            def cold(*args, **kwargs):
+                got = plain_cold(*args, **kwargs)
+                if kwargs.get("variant") is None:
+                    variant_file(f"{name}.py", planted_body.replace("1.01", "1.05"))
+                return got
+
+            bench.cold = cold
+            try:
+                return bench_run(name, "--variant", path, "--jobs", str(jobs)), bench.Variant(path).sha1
+            finally:
+                bench.cold = plain_cold
+
+        try:
+            one = bench_run("jobs-1")
+            two = bench_run("jobs-2", "--jobs", "2")
+            same = bench_run("identity", "--variant", identity)
+            moved = bench_run("planted-2", "--variant", planted, "--jobs", "2")
+            moved_one = bench_run("planted-1", "--variant", planted)
+            refused = bench_run("liar", "--variant", liar)
+            compared = len(handed)
+            early = {jobs: bench_run(f"on-import-{jobs}", "--variant", on_import, "--jobs", str(jobs))
+                     for jobs in (1, 2)}
+            failed = {jobs: bench_run(f"failing-{jobs}", "--variant", failing, "--jobs", str(jobs))
+                      for jobs in (1, 2)}
+            exited = {jobs: bench_run(f"exits-{jobs}", "--variant", found, "--jobs", str(jobs), stale=True)
+                      for jobs, found in ((1, exits_on_import), (2, exits_in_apply))}
+            doubled = {jobs: bench_run(f"twice-{jobs}", "--variant", twice, "--jobs", str(jobs)) for jobs in (1, 2)}
+            edited = {jobs: edited_run(f"edited-{jobs}", jobs) for jobs in (1, 2)}
+            # A model is dropped by its file's date; reading it leaves the date.
+            pruned = os.path.join(workdir, "pruned-cache")
+            bench_run("pruned-today", models=pruned)
+            todays = set(os.listdir(pruned))
+            bench_run("pruned-variant", "--variant", planted, models=pruned)
+            theirs = set(os.listdir(pruned)) - todays
+            aged(pruned, todays | theirs)
+            bench_run("pruned-variant-again", "--variant", planted, models=pruned)
+            kept_both = still_aged(pruned)
+            bench_run("pruned-plain", models=pruned)
+            kept_plain, left = still_aged(pruned), set(os.listdir(pruned))
+            processors, caps = os.cpu_count, {}
+            try:
+                for cpus in (64, 4):
+                    os.cpu_count = lambda cpus=cpus: cpus
+                    caps[cpus] = (bench.jobs_allowed(62), bench.jobs_allowed(2),
+                                  bench_run(f"capped-{cpus}", "--jobs", "62", "--cutoff", "day", "--since",
+                                            "2026-07-20", "--until", "2026-07-21"))
+            finally:
+                os.cpu_count = processors
+            spread = bench_run("spread", "--jobs", "3", "--since", "2026-07-20", "--until", "2026-07-21")
+            agrees = stand_in.compare
+
+            def refuses(a, b):
+                raise ValueError("pages: the variant did not read 2 of the 3 boards the base read "
+                                 "(--unchecked pages to compare all the same)")
+
+            stand_in.compare = refuses
+            try:
+                not_compared = bench_run("not-compared", "--variant", identity)
+            finally:
+                stand_in.compare = agrees
+        finally:
+            if saved_module is None:
+                sys.modules.pop("analysis.bench_compare", None)
+            else:
+                sys.modules["analysis.bench_compare"] = saved_module
+            if saved_attr is None:
+                if hasattr(analysis, "bench_compare"):
+                    del analysis.bench_compare
+            else:
+                analysis.bench_compare = saved_attr
+        today = one[1][0]
+        check("two processes give the file one gives: the same forecasts in the same order, the same counts",
+              (0, 0, True, True, True),
+              (one[0], two[0], len(today["pairs"]) > 5, today["replays"]["cups"] > 0, plain(two[1][0]) == plain(today)))
+        with db.session(bench_db) as conn:
+            # A week on, a cut of more cups than any cut before it; in it, the
+            # cup entered first starts last.
+            edition(conn, "Bench Cup", "EU", "2026-07-27", 1.0, hour=20)
+            edition(conn, "Morning Cup", "EU", "2026-07-27", 1.0)
+            edition(conn, "Morning Cup", "NAC", "2026-07-27", 1.0)
+        with db.session(bench_db) as conn:
+            alone_run, shared_run = (bench.cold(conn, "2026-07-13", "2026-07-28", catalogue, None, "k", progress=False,
+                                                jobs=jobs, database=(bench_db, False)) for jobs in (1, 3))
+            started = {row[0]: row[1] for row in conn.execute("SELECT id, start_time FROM competition")}
+        cups_of = {}
+        for p in alone_run["pairs"]:
+            cups_of.setdefault(p["model"], set()).add(p["id"])
+        sizes = [alone_run["models"][cut]["cups"] for cut in sorted(cups_of)]
+        check("the cuts priced hold one of more cups than a cut priced before it, and one whose cups did not "
+              "start in the order of their ids",
+              (True, True),
+              (any(size > min(sizes[:n]) for n, size in enumerate(sizes) if n),
+               any(sorted(ids, key=lambda i: (started[i], i)) != sorted(ids) for ids in cups_of.values())))
+        check("and so do three on the cups of the list, cut by cut",
+              (True, True),
+              (len(alone_run["pairs"]) > 20 and len(alone_run["models"]) > 3,
+               all(alone_run[k] == shared_run[k] for k in ("pairs", "skipped", "refused", "models", "cups",
+                                                           "replays", "bands", "model_key"))))
+        order = [(p["model"], started[p["id"]], p["id"], p["rank"]) for p in alone_run["pairs"]]
+        check("a cut prices its cups in the order they started, then by id, each rank in turn, and three "
+              "processes keep that order",
+              (True, True, True),
+              (any(len(ids) > 1 for ids in cups_of.values()), order == sorted(order),
+               [(p["model"], p["id"], p["rank"]) for p in shared_run["pairs"]]
+               == [(p["model"], p["id"], p["rank"]) for p in alone_run["pairs"]]))
+        check("a variant that changes nothing: today's run as a plain run writes it, the variant's the same "
+              "forecasts and the same fields, named and dated by its file, its models under its own key",
+              (0, 2, True, True, {"path": os.path.abspath(identity), "sha1": bench.Variant(identity).sha1},
+               ["model_key", "variant"]),
+              (same[0], len(same[1]), plain(same[1][0]) == plain(today),
+               same[1][1]["pairs"] == today["pairs"], same[1][1].get("variant"),
+               sorted(k for k in set(same[1][0]) | set(same[1][1])
+                      if k != "generated" and same[1][0].get(k) != same[1][1].get(k))))
+        before, after = moved[1]
+        ratios = {round(a["forecast"] / b["forecast"], 9) for a, b in zip(after["pairs"], before["pairs"])}
+        check("a variant planted one percent high is one percent high on every forecast, its ranges as wide",
+              (True, {1.01}, True),
+              ([(p["window"], p["rank"]) for p in after["pairs"]]
+               == [(p["window"], p["rank"]) for p in before["pairs"]],
+               ratios, all(abs(a["rel"] - b["rel"]) < 1e-9 for a, b in zip(after["pairs"], before["pairs"]))))
+        check("and two processes give the variant's run one gives",
+              (True, True), (plain(moved_one[1][1]) == plain(after), plain(moved_one[1][0]) == plain(today)))
+        check("the two runs go to the comparison, today's first",
+              (True, None, os.path.abspath(planted), "compared"),
+              (compared == 3, handed[1][0].get("variant"), handed[1][1]["variant"]["path"],
+               moved[2].strip().splitlines()[-1].split()[0]))
+        check("a variant that says it leaves the models alone and does not is refused, today's run alone "
+              "written",
+              (2, 1, True), (refused[0], len(refused[1]), plain(refused[1][0]) == plain(today)))
+        check("a variant that makes its replacement as it is imported leaves today's run as a plain run writes "
+              "it, in one process or two, and is one percent high in its own",
+              (0, 0, True, True, {1.01}, {1.01}),
+              (early[1][0], early[2][0], plain(early[1][1][0]) == plain(today), plain(early[2][1][0]) == plain(today),
+               ratios_of(early[1]), ratios_of(early[2])))
+        check("a variant that fails leaves today's run written as a plain run writes it, says why, and ends "
+              "with an error, in one process or two",
+              (1, 1, 1, 1, True, True, True),
+              (failed[1][0], failed[2][0], len(failed[1][1]), len(failed[2][1]),
+               plain(failed[1][1][0]) == plain(today), plain(failed[2][1][0]) == plain(today),
+               all("The variant's run failed (RuntimeError: this variant fails)" in run[2]
+                   for run in failed.values())))
+        check("a variant that leaves the process, as it is run or in apply(), is caught the same: today's run "
+              "written, no file of the variant's left from an earlier run, an error",
+              (1, 1, [1, 1], True, True, True),
+              (exited[1][0], exited[2][0], [len(run[1]) for run in exited.values()],
+               plain(exited[1][1][0]) == plain(today), plain(exited[2][1][0]) == plain(today),
+               all("The variant's run failed (SystemExit: 0)" in run[2] for run in exited.values())))
+        check("a variant whose apply() puts nothing back is applied once, in one process or two: one percent "
+              "high, and no replacement left in this process after any run",
+              (0, 0, {1.01}, {1.01}, []),
+              (doubled[1][0], doubled[2][0], ratios_of(doubled[1]), ratios_of(doubled[2]), left_behind))
+        first_sha1 = hashlib.sha1(planted_body.encode()).hexdigest()
+        check("a variant's file edited during the run: the text read as it began runs, in one process or two, "
+              "under the SHA-1 written",
+              ([0, 0], [True, True], [first_sha1, first_sha1], [{1.01}, {1.01}]),
+              ([run[0] for run, _ in edited.values()], [after != first_sha1 for _, after in edited.values()],
+               [run[1][1]["variant"]["sha1"] for run, _ in edited.values()],
+               [ratios_of(run) for run, _ in edited.values()]))
+        check("a run with a variant drops no model, today's or its own; a plain run drops the old ones of "
+              "other keys",
+              (True, True, True, True),
+              (bool(todays) and bool(theirs), todays | theirs <= kept_both, todays <= kept_plain,
+               not theirs & left))
+        windows = sys.platform == "win32"
+        pool = (61, "the most this system runs in one pool") if windows else (62, "")
+        check("more processes than the system's pool takes, or than it has processors, are cut down to what "
+              "it takes, and the run says so",
+              (pool, (2, ""), 0, windows, (4, "the processors this system has"), 0, True),
+              (caps[64][0], caps[64][1], caps[64][2][0],
+               "--jobs 62: 61 processes at most, the most this system runs in one pool" in caps[64][2][2],
+               caps[4][0], caps[4][2][0],
+               "--jobs 62: 4 processes at most, the processors this system has" in caps[4][2][2]))
+        cutoffs = len(spread[1][0]["models"])
+        check("a run starts no more processes than it has cutoffs, and says how many",
+              (0, 2, True),
+              (spread[0], cutoffs, f"{min(3, cutoffs, os.cpu_count() or 1)} processes for {cutoffs} cutoffs, "
+               "each with its own read-only connection" in spread[2]))
+
+        # The variant's models: its own, keyed on its source, unless it leaves
+        # them alone; then today's are read, none built.
+        keys = [bench.Variant(planted).key("k")]
+        variant_file("planted.py", planted_body + "# another line\n")
+        keys.append(bench.Variant(planted).key("k"))
+        check("the variant's models are kept under a key that moves with its source, but for one that leaves "
+              "them alone", (3, "k"), (len(set(keys) | {"k"}), bench.Variant(pricing_only).key("k")))
+        kept = rescore.RAW
+        rescore.RAW = pages
+        try:
+            with db.session(replay_db) as conn:
+                runs = {name: bench.cold(conn, "2026-07-13", "2026-07-21", {}, cache, "k", progress=False,
+                                         jobs=jobs, database=(replay_db, False),
+                                         variant=bench.Variant(found) if found else None)
+                        for name, found, jobs in (("plain", None, 1), ("pricing", pricing_only, 1),
+                                                  ("model", planted, 2))}
+        finally:
+            rescore.RAW = kept
+        check("a pricing-only variant reads today's models; one that may change them builds its own",
+              (True, 0, True, True),
+              (runs["plain"]["built"] + runs["plain"]["read"] > 0, runs["pricing"]["built"],
+               runs["pricing"]["model_key"] == runs["plain"]["model_key"],
+               runs["model"]["built"] > 0 and runs["model"]["model_key"] != runs["plain"]["model_key"]))
+        missing = dict(module=sys.modules.get("analysis.bench_compare"), attr=getattr(analysis, "bench_compare", None))
+        sys.modules["analysis.bench_compare"] = None
+        if missing["attr"] is not None:
+            del analysis.bench_compare
+        try:
+            alone = bench_run("alone", "--variant", identity)
+        finally:
+            if missing["module"] is None:
+                sys.modules.pop("analysis.bench_compare", None)
+            else:
+                sys.modules["analysis.bench_compare"] = missing["module"]
+            if missing["attr"] is not None:
+                analysis.bench_compare = missing["attr"]
+        check("without bench_compare the two runs are still written, and the run says why nothing was compared",
+              (0, 2, True), (alone[0], len(alone[1]), "bench_compare.py is not here" in alone[2]))
+
+        # The model the page served: the rows the database held when its
+        # model.json was committed. The European edition of the 13th was only
+        # caught up with on the 25th.
+        served = ["2026-07-10 12:00:00", "2026-07-20 17:30:00"]
+        with db.session(bench_db) as conn:
+            conn.execute("UPDATE competition SET created_at = datetime(COALESCE(end_time, start_time), '+2 hours')")
+            conn.execute("UPDATE competition SET created_at = '2026-07-25 10:00:00' "
+                          "WHERE name = 'Bench Cup EU 2026-07-13'")
+        check("a cup reads the model.json committed last before it starts; the database dates rows in Paris time",
+              ("2026-07-20 17:30:00", "2026-07-20 19:30:00", "2026-12-01 18:30:00"),
+              (bench.cutoff_of("2026-07-20 18:00:00", "published", served=served),
+               bench.paris_of("2026-07-20 17:30:00"), bench.paris_of("2026-12-01 17:30:00")))
+        dated = bench.CREATED_SINCE
+        try:
+            bench.CREATED_SINCE = "2026-07-12 00:00:00"
+            with db.session(bench_db) as conn:
+                shown = {jobs: bench.cold(conn, "2026-07-06", "2026-07-21", catalogue, None, "k", "published",
+                                          progress=False, jobs=jobs, database=(bench_db, False), served=served)
+                         for jobs in (1, 2)}
+                updated = bench.cold(conn, "2026-07-20", "2026-07-21", catalogue, None, "k", progress=False)
+                # The models it reads are kept under keys of their own, one
+                # for each set of rows: a month old, they stay all the same.
+                served_models = os.path.join(workdir, "served-cache")
+                kept_served = []
+                for again in (False, True):
+                    if again:
+                        aged(served_models, os.listdir(served_models))
+                    kept_served.append(bench.cold(conn, "2026-07-06", "2026-07-21", catalogue, served_models, "k",
+                                                  "published", progress=False, served=served))
+                    kept_served[-1]["files"] = set(os.listdir(served_models))
+        finally:
+            bench.CREATED_SINCE = dated
+        page = next((p for p in shown[1]["pairs"] if (p["family"], p["region"], p["day"], p["rank"])
+                     == ("Bench Cup", "EU", "2026-07-20", 100)), {})
+        daily = next((p for p in updated["pairs"] if (p["family"], p["region"], p["day"], p["rank"])
+                      == ("Bench Cup", "EU", "2026-07-20", 100)), {})
+        check("the page's model leaves out a row the database only had later, which the daily rule reads",
+              ("2026-07-20 17:30:00", round(base[100], 1), True),
+              (page.get("model"), page.get("forecast"), daily.get("forecast") != page.get("forecast")))
+        skipped = shown[1]["skipped"]
+        check("a cup before the first model served, or served one built before rows were dated, is counted out",
+              (True, True, True),
+              (skipped["cups started before the first model the page served"] > 0,
+               skipped["cups the page priced from a model built before the database dated its rows"] > 0,
+               all(shown[1][k] == shown[2][k] for k in ("pairs", "skipped", "refused", "models", "replays"))))
+        check("a published run keeps the models it read, though a month old and of keys not today's",
+              (True, 0, True, True, True),
+              (kept_served[0]["built"] > 0, kept_served[1]["built"], kept_served[1]["read"] == kept_served[0]["built"],
+               kept_served[1]["files"] == kept_served[0]["files"] and bool(kept_served[1]["files"]),
+               still_aged(served_models) == kept_served[1]["files"]))
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            code = bench.main(["--cold", "--cutoff", "published", "--ladder", os.path.join(workdir, "no-ladder"),
+                               "--db", bench_db, "--catalogue", os.path.join(workdir, "no-catalogue"),
+                               "--cache", "none", "--since", "2026-07-06", "--until", "2026-07-21"])
+        check("without the page's history, a published run measures nothing and says why",
+              (2, True), (code, "No history of model.json" in printed.getvalue()))
+        check("two runs of one launch the comparison refuses are both written, and the run says why and what to add",
+              (2, 2, True, True),
+              (not_compared[0], len(not_compared[1]), "not set against each other" in not_compared[2],
+               "--unchecked pages compares them" in not_compared[2]))
+        refusals = []
+        for extra in (["--live", "--cutoff", "published"], ["--live", "--jobs", "2"],
+                      ["--live", "--variant", identity], ["--cold", "--arrival", "stamp"]):
+            printed = io.StringIO()
+            with contextlib.redirect_stdout(printed):
+                code = bench.main([*extra, "--db", bench_db, "--catalogue", os.path.join(workdir, "no-catalogue"),
+                                   "--cache", "none", "--since", "2026-07-06", "--until", "2026-07-21"])
+            refusals.append((code, "Nothing measured" in printed.getvalue()))
+        check("the live bench refuses the cold bench's --cutoff published, --jobs and --variant, and the cold bench "
+              "--arrival, rather than drop them", [(2, True)] * 4, refusals)
+
+    print("\n20. Two runs of the bench, forecast against forecast")
+    import importlib.util
+    if any(importlib.util.find_spec(p) is None for p in ("numpy", "pandas", "scipy")):
+        print("   (skipped: analysis/ needs its own requirements, see analysis/requirements.txt)")
+    else:
+        import copy
+        import random
+        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        from analysis import bench_compare
+
+        def bench_pair(window, rank, day, region, error, result=None, **more):
+            result = result or round(400 * rank ** -0.25, 1)
+            return dict({"window": window, "rank": rank, "day": day, "region": region, "season": 42,
+                         "forecast": result * (1 + error / 100), "result": result, "rel": 0.2,
+                         "bands": {"50": [-0.5, 0.5], "90": [-1.5, 1.5]}, "source": "previous edition",
+                         "at_cut": rank == 100, "id": 0, "model": f"{day} 16:00:00"}, **more)
+
+        def bench_run(pairs, **more):
+            run = {"bench": "cold", "since": "2026-07-01", "until": "2026-07-29", "cutoff": "update",
+                   "update": {"paris": ["18:00"], "online_after_minutes": 30},
+                   "database": {"sha1": "a" * 40}, "catalogue": {"sha1": "b" * 40},
+                   "leaderboards": {"events": 2}, "replays": {"boards": ["E1|W1|20|0badf00d", "E2|W2|35|feedface"]},
+                   "bands": {"generated": "2026-06-30", "from": "2026-06-01"},
+                   "ranks": [10, 25, 100, 250, 500, 1000], "pairs": pairs}
+            run.update(more)
+            return run
+
+        # Four weeks of cups in three regions, every forecast a little high.
+        draw = random.Random(20)
+        cups = [bench_pair(f"Cup{d}|{region}", rank, f"2026-07-{1 + d:02d}", region, 0.5 + abs(draw.gauss(4, 6)))
+                for d in range(28) for region in ("EU", "NAC", "OCE") for rank in (10, 100, 500, 1000)]
+        base_run = bench_run(cups)
+
+        def moved(run, how):
+            return dict(run, pairs=[dict(p, forecast=how(p)) for p in run["pairs"]])
+
+        def worse_by_a_point(p):
+            return p["forecast"] + 0.01 * p["result"] * (1 if p["forecast"] >= p["result"] else -1)
+
+        itself = bench_compare.compare(base_run, copy.deepcopy(base_run))
+        check("a run against itself: every change 0, its interval [0, 0], and no change",
+              ("no change", 0, 0.0, [0.0, 0.0], True),
+              (itself["verdict"], itself["moved"], itself["overall"]["all"]["change"]["abs_mean"],
+               itself["interval"]["abs_mean"],
+               json.dumps(itself) == json.dumps(bench_compare.compare(base_run, copy.deepcopy(base_run)))))
+
+        def judged(base, variant, **more):
+            """The verdict of two runs, or what refused them."""
+            try:
+                return bench_compare.compare(base, variant, draws=0, **more)["verdict"]
+            except bench_compare.SnapshotMismatch as refusal:
+                return f"refused: {refusal}"
+
+        refused = {}
+        for name, other in (("database", {"database": {"sha1": "c" * 40}}),
+                            ("-wal", {"database": {"sha1": "a" * 40, "wal_sha1": "c" * 40}}),
+                            ("bench", {"bench": "other"}), ("catalogue", {"catalogue": {"sha1": "d" * 40}}),
+                            ("span", {"since": "2026-07-02"}), ("ranks", {"ranks": [10, 25, 100, 250, 500]}),
+                            ("pages", {"replays": {"boards": ["E1|W1|20|0badf00d", "E2|W2|35|00000000"]}}),
+                            ("pages on disk", {"leaderboards": {"events": 5}}),
+                            ("cutoff", {"cutoff": "day"}),
+                            ("update", {"update": {"paris": ["16:00"], "online_after_minutes": 30}}),
+                            ("bands", {"bands": {"generated": "2026-06-23", "from": "2026-06-01"}}),
+                            ("no catalogue", {"catalogue": {"windows": 10}}), ("arrival", {"arrival": "feed"})):
+            refused[name] = judged(base_run, bench_run(cups, **other)).startswith("refused")
+        more_boards = bench_run(cups, replays={"boards": base_run["replays"]["boards"] + ["E3|W3|12|12345678"]})
+        unchecked = bench_compare.compare(base_run, bench_run(cups, catalogue={"windows": 10}),
+                                          unchecked=("catalogue",))
+        check("two snapshots are refused: database, -wal, bench, catalogue, span, ranks, a page read, the pages on "
+              "disk, the rule, its hour, the ranges, a run that does not name its catalogue or its arrival",
+              {name: True for name in refused}, refused)
+        check("a variant may read more boards, list its ranks in another order, and a catalogue left unchecked "
+              "is said in the verdict",
+              ("no change", "no change", ["catalogue (not in the variant)"]),
+              (judged(base_run, more_boards), judged(base_run, bench_run(cups, ranks=[1000, 500, 250, 100, 25, 10])),
+               unchecked["snapshot"]["unchecked"]))
+        check("a run's rule of arrival: the same on both sides compares, two rules are refused",
+              ("no change", True),
+              (judged(bench_run(cups, arrival="feed"), bench_run(cups, arrival="feed")),
+               judged(bench_run(cups, arrival="stamp"), bench_run(cups, arrival="feed")).startswith("refused")))
+
+        # The live bench keeps its forecasts under "forecasts", one per cup,
+        # rank and point: two live runs are not paired, they are refused.
+        def live_run(run):
+            live = {k: v for k, v in run.items() if k != "pairs"}
+            return dict(live, bench="live", arrival="feed",
+                        forecasts=[dict(p, point=point) for p in run["pairs"] for point in ("20 %", "50 %")])
+
+        live = {}
+        for name, runs in (("both live", (live_run(base_run), live_run(base_run))),
+                           ("the variant live", (base_run, live_run(base_run))),
+                           ("forecasts and no pairs", (base_run, {k: v for k, v in live_run(base_run).items()
+                                                                  if k != "bench"}))):
+            try:
+                live[name] = judged(*runs)
+            except ValueError as error:
+                live[name] = str(error)
+        try:
+            live["the strawman of a live run"] = str(bench_compare.strawman(live_run(base_run), {}))[:80]
+        except ValueError as error:
+            live["the strawman of a live run"] = str(error)
+        check("live runs are not paired yet: refused, whichever side, with what they are",
+              {name: True for name in live},
+              {name: told.startswith("live runs are not paired yet") for name, told in live.items()})
+
+        # Each pair aims at one result: a variant that moved a result, or a
+        # cup's id, day, region or cut, would be judged against another truth.
+        aimed = {}
+        for name, how in (("result", lambda p: dict(p, result=p["result"] * 1.1)), ("id", lambda p: dict(p, id=7)),
+                          ("day", lambda p: dict(p, day="2026-07-02")), ("region", lambda p: dict(p, region="ASIA")),
+                          ("at_cut", lambda p: dict(p, at_cut=not p["at_cut"]))):
+            told = judged(base_run, bench_run([how(p) if n in (3, 5) else p for n, p in enumerate(cups)]))
+            aimed[name] = (told.startswith("refused") and "2 of the 336 paired forecasts" in told
+                           and f"({name}: 2)" in told and "first Cup0|EU at rank 1000" in told)
+        aimed["a result 1e-12 off"] = judged(base_run, bench_run([dict(p, result=p["result"] + 1e-12)
+                                                                  for p in cups])) == "no change"
+        aimed["a result 1e-6 off"] = judged(base_run, bench_run([dict(p, result=p["result"] + 1e-6)
+                                                                 if n == 7 else p for n, p in enumerate(cups)])) \
+            .startswith("refused: 1 of the 336 paired forecasts")
+        check("a pair must aim at the same thing on both sides: another result, id, day, region or cut is refused, "
+              "with how many pairs and the first", {name: True for name in aimed}, aimed)
+
+        # Pages: a variant that did not read every board the base read is
+        # refused, unless told not to check them, and the verdict then says so.
+        one_read = bench_run(cups, replays={"boards": base_run["replays"]["boards"][:1]})
+        none_read = bench_run(cups, replays={"boards": []})
+        one_and_another = bench_run(cups, replays={"boards": base_run["replays"]["boards"][:1] + ["E9|W9|20|0badf00d"]})
+        subset = bench_compare.compare(base_run, one_read, draws=0, unchecked=("pages",))
+        check("a variant that did not read every board of the base is refused, unless the pages are left unchecked, "
+              "and the verdict then says how many it did not read",
+              (True, True, True, "no change", "no change", 1,
+               "verdict: NO CHANGE (not checked: pages (the variant did not read 1 of the 2 boards the base read))"),
+              (judged(base_run, none_read).startswith("refused"), judged(base_run, one_read).startswith("refused"),
+               judged(base_run, one_and_another).startswith("refused"),
+               judged(base_run, none_read, unchecked=("pages",)), subset["verdict"],
+               subset["snapshot"]["boards of the base not read by the variant"], bench_compare.verdict_line(subset)))
+
+        planted = bench_compare.compare(base_run, moved(base_run, lambda p: p["forecast"] * 1.01))
+        shift = sum(p["forecast"] / p["result"] for p in cups) / len(cups)
+        low, high = planted["interval"]["signed_mean"]
+        check("a variant planted 1 % higher everywhere is found: its shift, an interval clear of 0, and a loss",
+              (round(shift, 9), True, True, "loss"),
+              (round(planted["overall"]["all"]["change"]["signed_mean"], 9), low > 0,
+               planted["interval"]["abs_mean"][0] > 0, planted["verdict"]))
+        apart = bench_compare.compare(base_run, moved(base_run, worse_by_a_point))
+        check("and one a point worse on every forecast is a point worse, to the draw",
+              (1.0, [1.0, 1.0], "loss"),
+              (round(apart["overall"]["all"]["change"]["abs_mean"], 9),
+               [round(x, 9) for x in apart["interval"]["abs_mean"]], apart["verdict"]))
+        replanted = bench_compare.compare(base_run, moved(base_run, lambda p: p["forecast"] * 1.01))["interval"]
+        reseeded = bench_compare.compare(base_run, moved(base_run, lambda p: p["forecast"] * 1.01), seed=1)["interval"]
+        check("the draws come from a fixed seed: the same interval every time, another one with another seed",
+              (True, True), (replanted == planted["interval"], reseeded["abs_mean"] != planted["interval"]["abs_mean"]))
+        only_fewer = bench_compare.compare(base_run, bench_run(cups[1:]), draws=0)
+        check("a variant that only leaves forecasts out is never 'no change'",
+              ("no gain", 0, 1), (only_fewer["verdict"], only_fewer["moved"], only_fewer["unpaired"]["base only"]))
+        ranges = {"ranges": [dict(p, bands={"50": [-0.25, 0.25], "90": [-1.5, 1.5]}) for p in cups],
+                  "spread": [dict(p, rel=0.1) for p in cups]}
+        ranged = {name: bench_compare.compare(base_run, bench_run(pairs), draws=0) for name, pairs in ranges.items()}
+        check("nor is a variant that only changes the ranges: its forecasts count as moved",
+              {name: ("no gain", 336) for name in ranges},
+              {name: (found["verdict"], found["moved"]) for name, found in ranged.items()})
+        # One cup of twenty a point worse, the others as they were: the cups
+        # drawn hold it k times, k binomial (20, 1/20), so the change drawn is
+        # k / 20 point. P(k <= 2) = 0.925 and P(k <= 3) = 0.984: the 95th
+        # percentile is 3 cups, the 90th 2.
+        twenty = bench_run([bench_pair(f"Twenty|{n:02d}", rank, f"2026-07-{n + 1:02d}", "EU", 5.0)
+                            for n in range(20) for rank in (10, 100)])
+        one_worse = bench_compare.compare(twenty, moved(twenty, lambda p: worse_by_a_point(p)
+                                                        if p["window"] == "Twenty|00" else p["forecast"]))
+        check("the interval is the 90 % one: one cup of twenty a point worse puts it at [0, 3/20]",
+              (0.9, [0.0, 0.15], 0.05), (one_worse["interval"]["level"],
+                                         [round(x, 9) for x in one_worse["interval"]["abs_mean"]],
+                                         round(one_worse["overall"]["all"]["change"]["abs_mean"], 9)))
+        # 30 % over turned into 27 % under: closer, yet further in log.
+        over = bench_run([dict(p, forecast=p["result"] * 1.3) for p in cups])
+        under = bench_compare.compare(over, moved(over, lambda p: p["result"] * 0.73))
+        check("an error that shrinks but grows in log is no gain, failed on the log and on the halves",
+              ("no gain", ["mean log error down", "mean, median |error| and log error down in both halves"], True),
+              (under["verdict"], under["failed"], under["interval"]["abs_mean"][1] < 0))
+        # Better in the first half of the span, worse in the second.
+        halves = bench_compare.compare(base_run, moved(base_run, lambda p: (p["result"] + p["forecast"]) / 2
+                                                       if p["day"] < "2026-07-15" else worse_by_a_point(p)))
+        check("the halves split the span in its middle; a change better in one and worse in the other fails them",
+              ([("2026-07-01", "2026-07-15", 168), ("2026-07-15", "2026-07-29", 168)], True, True, False),
+              ([(h["since"], h["until"], h["pairs"]) for h in halves["halves"]],
+               halves["halves"][0]["change"]["abs_mean"] < 0, halves["halves"][1]["change"]["abs_mean"] > 0,
+               next(c["holds"] for c in halves["conditions"] if "halves" in c["rule"])))
+        deep = bench_compare.compare(base_run, moved(base_run, lambda p: p["result"] + (p["forecast"] - p["result"]) / 4
+                                                     if p["rank"] <= 250 else worse_by_a_point(p)))
+        check("a gain everywhere but past rank 250, a point worse there, fails on that rank band alone",
+              (["no rank band worse by more than 0.5 point"], "251+ +1.00"),
+              (deep["failed"], next((c["detail"] for c in deep["conditions"] if c["rule"].startswith("no rank band")),
+                                    None)))
+
+        # A cup's forecasts err together, so the cups are drawn, not the
+        # forecasts: two cups of forty, one a point worse and one a point
+        # better, leave the change anywhere from -1 to +1.
+        two = bench_run([bench_pair(f"Pair|{n}", rank, "2026-07-0" + str(n + 1), "EU", 5.0)
+                         for n in range(2) for rank in range(10, 410, 10)])
+        drawn = bench_compare.compare(two, moved(two, lambda p: p["forecast"] + 0.01 * p["result"] * (
+            1 if p["window"] == "Pair|0" else -1)))
+        check("the draws are of cups: two cups, a point worse and a point better, give an interval of [-1, +1], "
+              "no gain and no loss",
+              (0.0, [-1.0, 1.0], "no gain"), (round(drawn["overall"]["all"]["change"]["abs_mean"], 9),
+                                              [round(x, 9) for x in drawn["interval"]["abs_mean"]], drawn["verdict"]))
+
+        def better_but_oceania(p):
+            if p["region"] == "OCE":
+                return worse_by_a_point(p)
+            return p["result"] + (p["forecast"] - p["result"]) / 2
+
+        better = bench_compare.compare(base_run, moved(base_run, lambda p: better_but_oceania(dict(p, region="EU"))))
+        one_region = bench_compare.compare(base_run, moved(base_run, better_but_oceania))
+        check("a gain passes the rule; the same gain with one region a point worse fails on that region alone",
+              ("gain", "no gain", ["no region worse by more than 0.5 point"], "OCE +1.00"),
+              (better["verdict"], one_region["verdict"], one_region["failed"],
+               next(c["detail"] for c in one_region["conditions"] if c["rule"].startswith("no region"))))
+        # Forecasts 25 % over results of 64 points, then 26 % over on half of
+        # Oceania's and 12.5 % elsewhere: Oceania exactly half a point worse.
+        sixty_four = bench_run([dict(p, result=64.0, forecast=80.0) for p in cups])
+        edge = bench_compare.compare(sixty_four, moved(sixty_four, lambda p: p["result"] * (
+            (1.26 if p["rank"] in (10, 1000) else 1.25) if p["region"] == "OCE" else 1.125)), draws=0)
+        check("a region exactly 0.5 point worse is not worse by more than 0.5 point",
+              (0.5, True, "none"), (edge["tables"]["region"]["OCE"]["change"]["abs_mean"],
+                                    *next((c["holds"], c["detail"]) for c in edge["conditions"]
+                                          if c["rule"].startswith("no region"))))
+        # A long run: three seasons, the change judged by the most of them.
+        seasons = bench_run([dict(p, season=40 if p["day"] < "2026-07-11" else 41 if p["day"] < "2026-07-21" else 42)
+                             for p in cups])
+
+        def by_seasons(run, gaining, losing=worse_by_a_point):
+            found = bench_compare.compare(run, moved(run, lambda p: p["result"] + (p["forecast"] - p["result"]) / 2
+                                                     if p["season"] in gaining else losing(p)), draws=0)
+            return next((c["holds"], c["detail"].split(" (")[0]) for c in found["conditions"] if "seasons" in c["rule"])
+
+        # Four weeks, four seasons: two of four is not most of them.
+        weekly = bench_run([dict(p, season=40 + (int(p["day"][8:]) - 1) // 7) for p in cups])
+        # Errors of 2, 4, 6 and 40 %: the big one halved, the others a point worse. The mean falls, the
+        # median rises, and a season that only lowers its mean is not a season the change helps.
+        lumpy = bench_run([dict(p, forecast=p["result"] * (1 + {10: 2, 100: 4, 500: 6, 1000: 40}[p["rank"]] / 100))
+                           for p in seasons["pairs"]])
+        check("over several seasons, the median and the log error have to fall in most of them, the mean alone "
+              "does not count",
+              ((True, "2 of 3 seasons with 20+ cups"), (False, "1 of 3 seasons with 20+ cups"),
+               (False, "2 of 4 seasons with 20+ cups"), (False, "1 of 3 seasons with 20+ cups")),
+              (by_seasons(seasons, {40, 41}), by_seasons(seasons, {42}), by_seasons(weekly, {40, 41}),
+               by_seasons(lumpy, {42}, lambda p: p["result"] * (1 + {10: 3, 100: 5, 500: 7, 1000: 20}[p["rank"]]
+                                                                / 100))))
+        dropped = bench_compare.compare(base_run, moved(bench_run(cups[1:]),
+                                                        lambda p: better_but_oceania(dict(p, region="EU"))))
+        check("a variant that leaves a forecast out is not a gain",
+              ("no gain", 1, ["every forecast of the base priced"]),
+              (dropped["verdict"], dropped["unpaired"]["base only"], dropped["failed"]))
+
+        # The strawman: a cup of the same group still running at the update
+        # (started before the cutoff, over after it) leans +50 %; the cup over
+        # before it, 0 %. Read walk-forward, the next cup is left as it was.
+        times = {1: {"start_time": "2026-07-01 18:00:00", "end_time": "2026-07-01 21:00:00"},
+                 2: {"start_time": "2026-07-02 15:00:00", "end_time": "2026-07-02 18:00:00"},
+                 3: {"start_time": "2026-07-02 19:00:00", "end_time": "2026-07-02 22:00:00"},
+                 4: {"start_time": "2026-07-04 19:00:00", "end_time": "2026-07-04 22:00:00"}}
+        straw_pairs = ([bench_pair("Old|EU", r, "2026-07-01", "EU", 0.0, id=1, model="2026-06-30 16:00:00")
+                        for r in (10, 100)]
+                       + [bench_pair("Late|EU", r, "2026-07-02", "EU", 50.0, id=2, model="2026-07-01 16:00:00")
+                          for r in (10, 25, 100, 250)]
+                       + [bench_pair("Next|EU", 10, "2026-07-02", "EU", 20.0, id=3, model="2026-07-02 16:00:00"),
+                          bench_pair("Then|EU", 10, "2026-07-04", "EU", 20.0, id=4, model="2026-07-04 16:00:00")])
+
+        def walk_forward(found):
+            """(the next cup left as it was, no forecast corrected by a cup over after its model)."""
+            after = {(p["window"], p["rank"]): p for p in found["pairs"]}
+            return (after[("Next|EU", 10)]["forecast"] == after[("Next|EU", 10)]["strawman"]["before"],
+                    all(p["strawman"]["latest"] <= p["model"] for p in found["pairs"] if p["strawman"]["n"]))
+
+        straw = bench_compare.strawman(bench_run(straw_pairs), times)
+        then = next(p for p in straw["pairs"] if p["window"] == "Then|EU")
+        # Two days on, the seven forecasts of the three cups over are in: median +50, shrunk by 7 / 57.
+        check("the strawman reads only the cups over before the model, and shrinks the median by n / (n + 50)",
+              ((True, True), 7, round(then["strawman"]["before"] / (1 + 50 * 7 / 57 / 100), 9)),
+              (walk_forward(straw), then["strawman"]["n"], round(then["forecast"], 9)))
+        kept = bench_compare.over_before
+        try:
+            bench_compare.over_before = lambda cup, cutoff: str(cup["start_time"])[:19] <= cutoff
+            leaky = bench_compare.strawman(bench_run(straw_pairs), times)
+        finally:
+            bench_compare.over_before = kept
+        check("and a strawman that reads a cup started before the cutoff but over after it is caught",
+              (False, False), walk_forward(leaky))
+        # Its groups: EU leans +10 % to rank 250 and +30 % past it, NAC the opposite way.
+        lean = {("EU", 10): 10, ("EU", 25): 10, ("EU", 500): 30, ("EU", 1000): 30}
+        lean.update({("NAC", rank): -value for (_, rank), value in lean.items()})
+        learned = [bench_pair(f"Learn|{region}", rank, "2026-07-01", region, value, id=1 if region == "EU" else 2,
+                              model="2026-06-30 16:00:00") for (region, rank), value in lean.items()]
+        target = [bench_pair("Target|EU", rank, "2026-07-03", "EU", 0.0, id=3, model="2026-07-02 16:00:00")
+                  for rank in (10, 500)]
+        over_by = {1: {"start_time": "2026-07-01 18:00:00", "end_time": "2026-07-01 21:00:00"},
+                   2: {"start_time": "2026-07-01 23:00:00", "end_time": "2026-07-02 02:00:00"},
+                   3: {"start_time": "2026-07-03 18:00:00", "end_time": "2026-07-03 21:00:00"}}
+        grouped = {}
+        for regions in (True, False):
+            found = bench_compare.strawman(bench_run(learned + target), over_by, regions=regions)
+            grouped[regions] = {p["rank"]: p["strawman"] for p in found["pairs"] if p["window"] == "Target|EU"}
+        check("the strawman's groups are the rung, the rank band (to 250, past it) and, unless left out, the region",
+              ((10.0, 30.0, 2), (0.0, 0.0, 4)),
+              tuple((round(grouped[r][10]["median"], 9) + 0.0, round(grouped[r][500]["median"], 9) + 0.0,
+                     grouped[r][10]["n"]) for r in (True, False)))
+
+        # The command: what it cannot read is said, with a code of 2.
+        import contextlib
+        folder = tempfile.mkdtemp(prefix="bench-compare-", dir=workdir)
+
+        def written(name, run):
+            path = os.path.join(folder, name)
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(run if isinstance(run, str) else json.dumps(run))
+            return path
+
+        def command(argv, entry=bench_compare.main):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+                try:
+                    code = entry(argv)
+                except (Exception, SystemExit) as error:  # what escapes the command fails the check, said as such
+                    code = f"{type(error).__name__}: {error}"
+            return code, out.getvalue()
+
+        base_file = written("base.json", base_run)
+        bad = {"no file": [base_file, os.path.join(folder, "missing.json")],
+               "not JSON": [base_file, written("broken.json", "{not json")],
+               "not a run": [base_file, written("list.json", [1, 2])],
+               "a day badly written": [base_file, base_file, "--since", "2026-7-9"],
+               "a day in another ISO form": [base_file, base_file, "--since", "20260709"],
+               "since after until": [base_file, base_file, "--since", "2026-07-20", "--until", "2026-07-10"],
+               "a forecast twice": [base_file, written("twice.json", bench_run(cups + cups[:1]))],
+               "a forecast of 0": [base_file, written("zero.json", bench_run([dict(cups[0], forecast=0)] + cups[1:]))],
+               "a forecast not a number": [base_file, written("nan.json", bench_run(
+                   [dict(cups[0], forecast=float("nan"))] + cups[1:]))]}
+        codes = {name: command(argv) for name, argv in bad.items()}
+        check("a file, a day or a forecast that cannot be read is said plainly, with a code of 2",
+              {name: (2, True) for name in bad},
+              {name: (code, out.startswith("Cannot compare:")) for name, (code, out) in codes.items()})
+        gap = written("gap.json", bench_run([p for p in cups if p["day"] != "2026-07-10"]))
+        empty = {"since past the span": [base_file, base_file, "--since", "2026-07-29"],
+                 "until before it": [base_file, base_file, "--until", "2026-07-01"],
+                 "no cup in the days asked": [gap, base_file, "--since", "2026-07-10", "--until", "2026-07-11"],
+                 "not one forecast in common": [base_file, written("elsewhere.json", bench_run(
+                     [dict(p, window="Elsewhere" + p["window"]) for p in cups]))],
+                 "two live runs": [written("live.json", live_run(base_run))] * 2}
+        empties = {name: command(argv) for name, argv in empty.items()}
+        last_day = command([base_file, base_file, "--since", "2026-07-28"])
+        check("nothing to pair is not compared: said plainly, a code of 2 and no verdict; an empty half is not printed",
+              ({name: (2, True, False) for name in empty}, 0, False, True),
+              ({name: (code, out.startswith("Cannot compare:"), "verdict" in out)
+                for name, (code, out) in empties.items()},
+               last_day[0], "2026-07-28 to 2026-07-27" in last_day[1], "2026-07-28 to 2026-07-28" in last_day[1]))
+        check("and live runs are said to be live", True, "live runs are not paired yet" in empties["two live runs"][1])
+        said = {"a day badly written": (codes["a day badly written"][1], "not a day written YYYY-MM-DD: '2026-7-9'"),
+                "a day in another ISO form": (codes["a day in another ISO form"][1],
+                                              "not a day written YYYY-MM-DD: '20260709'"),
+                "since after until": (codes["since after until"][1], "since 2026-07-20 is not before until 2026-07-10"),
+                "since past the span": (empties["since past the span"][1],
+                                        "since 2026-07-29 is not before the end of the runs' span (2026-07-29,"),
+                "until before it": (empties["until before it"][1],
+                                    "until 2026-07-01 is not after the start of the runs' span (2026-07-01)")}
+        check("days that cannot hold a cup of the runs are said as such", {name: True for name in said},
+              {name: told in out for name, (out, told) in said.items()})
+        no_catalogue = written("no-catalogue.json", bench_run(cups, catalogue={"windows": 10}))
+        forwarded = command(["--compare", base_file, no_catalogue, "--unchecked", "catalogue", "--since", "2026-07-10"],
+                            bench_compare.bench.main)
+        at_the_end = command([base_file, base_file, "--compare"], bench_compare.bench.main)
+        check("bench --compare hands every other option to the comparison, wherever it stands on the line",
+              (0, True, True, 2, 0, True),
+              (forwarded[0], "NOT CHECKED: catalogue" in forwarded[1], "cups from 2026-07-10" in forwarded[1],
+               command(["--compare", base_file, no_catalogue], bench_compare.bench.main)[0],
+               at_the_end[0], "verdict: NO CHANGE" in at_the_end[1]))
+
+        # The strawman, from the command: the run's database is read for the
+        # cups' end times, and only the database the run was made from.
+        import sqlite3
+        cups_db = os.path.join(folder, "cups.db")
+        conn = sqlite3.connect(cups_db)
+        conn.execute("CREATE TABLE competition (id INTEGER PRIMARY KEY, start_time TEXT, end_time TEXT)")
+        conn.executemany("INSERT INTO competition VALUES (?, ?, ?)",
+                         [(cid, cup["start_time"], cup["end_time"]) for cid, cup in times.items()])
+        conn.commit()
+        conn.close()
+        its_db = {"sha1": bench_compare.bench.file_sha1(cups_db)}
+        straws = {"its database": bench_run(straw_pairs, database=its_db),
+                  "another database": bench_run(straw_pairs),
+                  "a forecast without its model": bench_run([{k: v for k, v in p.items() if k != "model"}
+                                                             for p in straw_pairs], database=its_db)}
+        told = {name: command(["--strawman", written(f"straw-{n}.json", run), "--db", cups_db])
+                for n, (name, run) in enumerate(straws.items())}
+        check("--strawman reads the run's own database only, and a run it cannot read is said, with a code of 2",
+              {"its database": (0, True), "another database": (2, True), "a forecast without its model": (2, True)},
+              {name: (code, (("verdict:" in out) if name == "its database" else
+                             "is not the one the run was made from" in out if name == "another database" else
+                             out.startswith("Cannot compare:")))
+               for name, (code, out) in told.items()})
+
+    print("\n21. The list's history: a cup's result is read from a model made once it was over")
+    import importlib.util
+    if any(importlib.util.find_spec(p) is None for p in ("numpy", "pandas", "scipy")):
+        print("   (skipped: analysis/ needs its own requirements, see analysis/requirements.txt)")
+    else:
+        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        from analysis import coldbench
+        # A cup listed in the morning, 15:00 to 17:30 UTC. The 18:00 update in
+        # Paris (16:19 UTC) exports while it runs and holds the board of that
+        # minute; the next one (18:10 UTC) holds the final standings.
+        cup = {"kind": "History Cup", "name": "History Cup", "event": "epicgames_S42_HistoryCup_ME",
+               "window": "S42_HistoryCup_ME", "stage": 0, "region": "ME", "team": "Duo", "mode": "Reload",
+               "games": 12, "begin": "2026-09-24T15:00Z", "end": "2026-09-24T17:30Z", "tiers": [["i", 50, ""]],
+               "entry": "", "field": 0, "scoring": 0,
+               "fc": {"cut": 50, "field": 9950, "lobby": False,
+                      "ranks": [[50, 500.0, 0.28, "previous edition"], [100, 480.0, 0.28, "previous edition"]]}}
+        bands = {"quality": {"bands": {"50": [-0.5, 0.5], "90": [-1.5, 1.5]}}}
+
+        def history_model(direct):
+            row = {"category": "History Cup", "region": "ME", "team_mode": "Duo", "game_mode": "Reload",
+                   "latest": "2026-09-24", "level": direct["20"][0], "season": 42, "direct": direct}
+            return json.dumps(dict(bands, categories=[row] if direct else []))
+
+        blobs = {"cal": "window.CALENDAR = " + json.dumps({"generated": "2026-09-24T12:00Z", "days": 7,
+                                                           "scorings": [], "events": [cup]}) + ";",
+                 "m0": json.dumps(dict(bands, categories=[])),
+                 "m1": history_model({"20": [222.0, 1, None], "50": [213.0, 1, None], "100": [204.0, 1, None]}),
+                 "m2": history_model({"20": [537.0, 1, None], "50": [520.0, 1, None], "100": [508.0, 1, None]})}
+        # (commit, when, {path: blob}), oldest first.
+        commits = [("c1", "2026-09-24T12:00:00+00:00", {"calendar.js": "cal", "model.json": "m0"}),
+                   ("c2", "2026-09-24T16:19:00+00:00", {"model.json": "m1"}),
+                   ("c3", "2026-09-24T18:10:00+00:00", {"model.json": "m2"})]
+
+        def fake_git(repo, *args):
+            if args[0] == "rev-parse":
+                commit, path = args[1].split(":", 1)
+                found = ""
+                for name, _, files in commits:
+                    found = files.get(path, found)
+                    if name == commit:
+                        return found
+                raise RuntimeError("no such commit")
+            if args[0] == "log":
+                path = args[-1]
+                stamp = "%ct" in args[1]
+                lines = [f"{name} {int(datetime.fromisoformat(at).timestamp())}" if stamp else name
+                         for name, at, files in commits if path in files]
+                return "\n".join(lines if "--reverse" in args else lines[::-1])
+            raise RuntimeError(f"git {args[0]} not faked")
+
+        class FakeBlobs:
+            def __init__(self, repo):
+                pass
+
+            def read(self, blob):
+                return blobs[blob]
+
+            def close(self):
+                pass
+
+        real_git, real_blobs = coldbench.git, coldbench.Blobs
+        coldbench.git, coldbench.Blobs = fake_git, FakeBlobs
+        history = early = None
+        listed = []
+        try:
+            history = coldbench.History("predictor")
+            listed, _ = history.as_listed()
+            commits.pop()
+            early = coldbench.History("predictor")
+        except (TypeError, KeyError) as exc:
+            print(f"   ({type(exc).__name__}: {exc})")
+        finally:
+            coldbench.git, coldbench.Blobs = real_git, real_blobs
+        check("a model exported while the cup ran is not its result: the first one made after it settled is",
+              [(50, 520.0), (100, 508.0)], [(p["rank"], p["result"]) for p in listed])
+        check("a cup only ever held by a model made while it ran is left out, not read off that board",
+              (0, 1), (len(early.work) if early else -1,
+                       early.skipped.get("every model holding that day was made while the cup ran", 0)
+                       if early else -1))
+        check("the board settles half an hour past the window's end; a row without an end is not held back",
+              ("2026-09-24T18:00", ""), tuple(getattr(coldbench, "settled_by", lambda row: None)(row)
+                                              for row in (cup, dict(cup, end=""))))
+        check("the commit times are read in UTC, whatever the committer's clock",
+              ["2026-09-24T12:00", "2026-09-24T16:19", "2026-09-24T18:10"],
+              [m.get("at") for m in history.models] if history else None)
+
     print("\n" + "=" * 68)
     if FAILURES:
         print(f"  {len(FAILURES)} failure(s):")
