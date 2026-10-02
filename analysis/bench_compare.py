@@ -64,12 +64,12 @@ database), the median shrunk by n / (n + STRAWMAN_PRIOR) for a group of n
 forecasts. Learned walk-forward, it is what a correction by the groups the
 bench prints is worth out of sample.
 
-    python -m analysis.bench_compare base.json variant.json
-    python -m analysis.bench --compare base.json variant.json   (any option below too)
-    python -m analysis.bench_compare base.json variant.json --json out.json
-    python -m analysis.bench_compare base.json variant.json --unchecked catalogue
-    python -m analysis.bench_compare base.json variant.json --since 2026-09-09
-    python -m analysis.bench_compare --strawman base.json --db tracker.db --json strawman.json
+    python -m analysis.bench_compare data/base.json data/variant.json
+    python -m analysis.bench --compare data/base.json data/variant.json   (any option below too)
+    python -m analysis.bench_compare data/base.json data/variant.json --json data/compared.json
+    python -m analysis.bench_compare data/base.json data/variant.json --unchecked catalogue
+    python -m analysis.bench_compare data/base.json data/variant.json --since 2026-09-09
+    python -m analysis.bench_compare --strawman data/base.json --json data/strawman.json
 """
 from __future__ import annotations
 

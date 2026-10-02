@@ -90,7 +90,7 @@ point or two off a final of six weighs on a mean out of all proportion.
 
     python -m analysis.bench --live --since 2026-09-05 --until 2026-09-30
     python -m analysis.bench --live --arrival stamp   each reading known at its stamp
-    python -m analysis.bench --live --json out.json   every forecast and the tables
+    python -m analysis.bench --live --json data/live.json   every forecast and the tables
 
 The other options are the cold bench's. Readings from the feed exist from
 5 September 2026 on; a span that starts earlier measures the cups since then.

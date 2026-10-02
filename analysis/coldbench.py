@@ -73,8 +73,8 @@ same cups can lean under two names - the second day of the FNCS Solo
 qualifiers is also a field that shrank - so each bias says which costlier one
 holds most of its forecasts.
 
-What the list of 22 to 30 September said, 152 forecasts of 68 cups noted from
-24 September on (the history of 1 October): 8.1 % off in median, 4.2 % low in
+What the list of 22 to 30 September said, 152 forecasts of 68 cups: 8.1 % off
+in median, 4.2 % low in
 median, 36 % of the results inside the inner range and 77 % inside the outer
 one where they claim 50 and 90. The biases, costliest first: the Mobile
 Reload Victory Cup of 26 September, whose field grew by 60 to 120 % from one

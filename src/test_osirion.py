@@ -9,15 +9,40 @@ against fixtures whose right answers are known by construction.
 """
 from __future__ import annotations
 
+import atexit
 import io
 import json
 import os
+import shutil
+import stat
 import sys
 import tempfile
 import time
 from datetime import datetime, timedelta, timezone
 
 FAILURES: list[str] = []
+# Every folder the checks make, removed when they are over: a run leaves
+# nothing behind in the temporary folder.
+SCRATCH: list[str] = []
+
+
+def scratch(prefix: str, **kwargs) -> str:
+    folder = tempfile.mkdtemp(prefix=prefix, **kwargs)
+    SCRATCH.append(folder)
+    return folder
+
+
+@atexit.register
+def discard_scratch() -> None:
+    # git marks its objects read-only, which Windows will not delete as they are.
+    for folder in reversed(SCRATCH):
+        for where, _, names in os.walk(folder):
+            for name in names:
+                try:
+                    os.chmod(os.path.join(where, name), stat.S_IREAD | stat.S_IWRITE)
+                except OSError:
+                    pass
+        shutil.rmtree(folder, ignore_errors=True)
 
 
 def check(name, expected, got):
@@ -116,7 +141,7 @@ def main() -> int:
     # Before importing anything that reaches for a database. `db` resolves FNT_DB
     # once, at import time, so setting it later means the checks below run
     # against whatever real tracker is sitting in data/ — and write to it.
-    workdir = tempfile.mkdtemp(prefix="osirion-test-")
+    workdir = scratch("osirion-test-")
     os.environ["FNT_DB"] = os.path.join(workdir, "test.db")
     import osirion
 
@@ -206,7 +231,7 @@ def main() -> int:
     # rank downloaded made every tournament exactly as wide as the harvest was
     # deep, and the model knows a rank only as q = rank / field.
     import harvest_osirion as harvest
-    deep = tempfile.mkdtemp(prefix="osirion-field-")
+    deep = scratch("osirion-field-")
     harvest.RAW = deep
     partial = {"event_id": "e", "window_id": "w"}
     for page in range(3):                       # 3 pages fetched of 240 that exist
@@ -391,7 +416,7 @@ def main() -> int:
     # deep as its passes go. Once the cup has settled, a shallow pass reads it
     # again from page zero - ten pages - and whatever the deeper passes then
     # find on disk past that is still the board of that minute.
-    harvest.RAW = tempfile.mkdtemp(prefix="osirion-settle-")
+    harvest.RAW = scratch("osirion-settle-")
     served, asked = {"pages": 30, "top": 5000}, []          # an hour in: 5000 - rank
 
     def moving_board(event_id, window_id, page=0):
@@ -478,7 +503,7 @@ def main() -> int:
     # down as its answer, it told every later pass the window never ran.
     import http.client
     import urllib.error
-    harvest.RAW = tempfile.mkdtemp(prefix="osirion-net-")
+    harvest.RAW = scratch("osirion-net-")
     outage = {"error": None}
 
     def network(request, timeout=None):
@@ -564,7 +589,7 @@ def main() -> int:
     if not shutil.which("git"):
         print("   (git is not installed here: skipped)")
     else:
-        sandbox = Path(tempfile.mkdtemp(prefix="osirion-publish-"))
+        sandbox = Path(scratch("osirion-publish-"))
         (sandbox / "gitconfig").write_text("[user]\n\tname = Test\n\temail = test@example.invalid\n"
                                            "[commit]\n\tgpgsign = false\n")
         saved_env = dict(os.environ)
@@ -631,7 +656,7 @@ def main() -> int:
     # A chunk's derivations reach the database together, when it commits.
     # Window A, read again, is derived again; the build stops on window B,
     # before the commit - a Ctrl-C. The next build must not take A for done.
-    harvest.RAW = tempfile.mkdtemp(prefix="osirion-chunk-")
+    harvest.RAW = scratch("osirion-chunk-")
     ended = datetime.now(timezone.utc) - timedelta(days=2)
 
     def chunk_work(name):
@@ -1654,7 +1679,7 @@ def main() -> int:
                == [(p["model"], p["id"], p["rank"]) for p in alone_run["pairs"]]))
         check("a variant that changes nothing: today's run as a plain run writes it, the variant's the same "
               "forecasts and the same fields, named and dated by its file, its models under its own key",
-              (0, 2, True, True, {"path": os.path.abspath(identity), "sha1": bench.Variant(identity).sha1},
+              (0, 2, True, True, {"path": os.path.basename(identity), "sha1": bench.Variant(identity).sha1},
                ["model_key", "variant"]),
               (same[0], len(same[1]), plain(same[1][0]) == plain(today),
                same[1][1]["pairs"] == today["pairs"], same[1][1].get("variant"),
@@ -1670,7 +1695,7 @@ def main() -> int:
         check("and two processes give the variant's run one gives",
               (True, True), (plain(moved_one[1][1]) == plain(after), plain(moved_one[1][0]) == plain(today)))
         check("the two runs go to the comparison, today's first",
-              (True, None, os.path.abspath(planted), "compared"),
+              (True, None, os.path.basename(planted), "compared"),
               (compared == 3, handed[1][0].get("variant"), handed[1][1]["variant"]["path"],
                moved[2].strip().splitlines()[-1].split()[0]))
         check("a variant that says it leaves the models alone and does not is refused, today's run alone "
@@ -2146,7 +2171,7 @@ def main() -> int:
 
         # The command: what it cannot read is said, with a code of 2.
         import contextlib
-        folder = tempfile.mkdtemp(prefix="bench-compare-", dir=workdir)
+        folder = scratch("bench-compare-", dir=workdir)
 
         def written(name, run):
             path = os.path.join(folder, name)

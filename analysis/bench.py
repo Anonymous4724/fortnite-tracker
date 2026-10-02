@@ -74,12 +74,12 @@ the field it drew, are shown but never offered as biases.
     python -m analysis.bench --cold --cutoff published --since 2026-09-06   the model the page served
     python -m analysis.bench --cold --update 16:00    the daily update at another hour (Paris time)
     python -m analysis.bench --cold --update 18:00,22:15   two updates a day
-    python -m analysis.bench --cold --json out.json   every forecast, the tables and the biases
+    python -m analysis.bench --cold --json data/out.json   every forecast, the tables and the biases
     python -m analysis.bench --cold --cache DIR       where the models are kept
     python -m analysis.bench --cold --leaderboards DIR   the raw leaderboard pages the replays read
     python -m analysis.bench --cold --jobs 3          the cutoffs priced in three processes
-    python -m analysis.bench --cold --variant my_idea.py   today's code and a variant of it, side by side
-    python -m analysis.bench --compare a.json b.json   two runs written with --json, side by side
+    python -m analysis.bench --cold --variant ../ideas/my_idea.py   today's code and a variant of it, side by side
+    python -m analysis.bench --compare data/a.json data/b.json   two runs written with --json, side by side
     python -m analysis.bench --live --weeks 3         the forecast during each cup (analysis/bench_live.py)
 
 `--jobs` prices the models' cutoffs in that many processes, each with its own
@@ -91,7 +91,7 @@ size: the memory a run takes grows with `--jobs`. `--variant` names a Python
 file that replaces some of the app's functions (see `Variant`): the run prices
 the same cups twice from the same database, catalogue and pages, as the code
 is and with the file's replacements, writes the second run beside the first
-(`--json out.json` also writes out.variant.json) and sets the two against each
+(`--json data/out.json` also writes data/out.variant.json) and sets the two against each
 other. The file is read as the run starts, and what runs is that text, in
 every process, whatever becomes of the file meanwhile. It only runs once
 today's run is over and written: a variant that fails, exits or is refused
@@ -1381,10 +1381,10 @@ def run_json(args, run: dict, tables: tuple, since: str, until: str, path: str, 
         "tables": found, "biases": leaning, "pairs": pairs,
     }
     if commits:
-        payload["published"] = {"ladder": os.path.abspath(args.ladder), "commits": len(commits),
+        payload["published"] = {"ladder": os.path.basename(os.path.abspath(args.ladder)), "commits": len(commits),
                                 "since": CREATED_SINCE, "served": sorted(run["models"])}
     if variant is not None:
-        payload["variant"] = {"path": variant.path, "sha1": variant.sha1}
+        payload["variant"] = {"path": os.path.basename(variant.path), "sha1": variant.sha1}
     return payload
 
 

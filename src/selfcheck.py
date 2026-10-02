@@ -23,8 +23,13 @@ def check(name, condition, detail=""):
 
 
 def run(cmd, timeout=600, cwd=None):
-    p = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout,
-                       cwd=cwd or SRC)
+    # A command that runs past its time is a failure to report, not a reason
+    # to stop the checks after it.
+    try:
+        p = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout,
+                           cwd=cwd or SRC)
+    except subprocess.TimeoutExpired:
+        return 1, f"timed out after {timeout} s"
     return p.returncode, p.stdout + p.stderr
 
 
