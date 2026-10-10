@@ -439,19 +439,25 @@ def error(pair: dict) -> float:
     return 100.0 * (pair["forecast"] / pair["result"] - 1)
 
 
-def inside(pair: dict, key: str) -> bool | None:
+def inside(pair: dict, key: str, shown: bool = False) -> bool | None:
+    """Does the range `key` ("50", "90") hold the result? With `shown`, its
+    ends as the page prints them, each rounded to a whole number the way
+    JavaScript's Math.round does (halves up)."""
     bands = pair.get("bands")
     if not bands or not bands.get(key):
         return None
     lo, hi = bands[key]
     value, rel = pair["forecast"], pair["rel"]
-    return value * math.exp(lo * rel) <= pair["result"] <= value * math.exp(hi * rel)
+    low, high = value * math.exp(lo * rel), value * math.exp(hi * rel)
+    if shown:
+        low, high = math.floor(low + 0.5), math.floor(high + 0.5)
+    return low <= pair["result"] <= high
 
 
-def summary(pairs: list[dict]) -> dict:
+def summary(pairs: list[dict], shown: bool = False) -> dict:
     errors = [error(p) for p in pairs]
-    near = [x for x in (inside(p, "50") for p in pairs) if x is not None]
-    wide = [x for x in (inside(p, "90") for p in pairs) if x is not None]
+    near = [x for x in (inside(p, "50", shown) for p in pairs) if x is not None]
+    wide = [x for x in (inside(p, "90", shown) for p in pairs) if x is not None]
     return {"pairs": len(pairs), "windows": len({p["window"] for p in pairs}),
             "signed_mean": statistics.mean(errors) if errors else None,
             "signed_median": statistics.median(errors) if errors else None,

@@ -1097,7 +1097,17 @@ def predict_from_model(model: dict, tournament: dict) -> dict | None:
     `tournament` is the form: category, region, team_mode, game_mode, max_games,
     rank, and optionally field_size and a scoring table. Nothing here reaches for
     the database — that is the point of it.
+
+    The value and its range come rounded to the tenth, as the export checks
+    them. With `unrounded` set in the form they come as the page computes them,
+    unrounded, with the model's own `rel` beside them: the benches measure the
+    page's numbers. Nothing else changes.
     """
+    exact = bool(tournament.get("unrounded"))
+
+    def tenth(x: float) -> float:
+        return x if exact else round(x, 1)
+
     rank = int(tournament.get("rank") or 0)
     field = int(tournament.get("field_size") or 0)
     if field < 0:
@@ -1224,9 +1234,10 @@ def predict_from_model(model: dict, tournament: dict) -> dict | None:
                 break
     if direct:
         value, rel, n, note, effect, season = direct
-        return {"ok": True, "shape_source": "direct", "value": round(value, 1),
-                "low": round(max(0.0, value * (1 - rel)), 1),
-                "high": round(value * (1 + rel), 1), "n": n, "source": "previous edition",
+        return {"ok": True, "shape_source": "direct", "value": tenth(value),
+                "low": tenth(max(0.0, value * (1 - rel))),
+                "high": tenth(value * (1 + rel)), **({"rel": rel} if exact else {}),
+                "n": n, "source": "previous edition",
                 "games": int(tournament.get("max_games") or 0), "field": field,
                 "share": round(100 * rank / field, 2), "guessed_field": guessed,
                 "field_effect": round(effect, 1), "entry_note": note,
@@ -1250,9 +1261,10 @@ def predict_from_model(model: dict, tournament: dict) -> dict | None:
         lobby = lobby_estimate(model, tournament, rank, field)
         if lobby:
             value, rel = lobby["value"], lobby["rel"]
-            return {"ok": True, "shape_source": "lobby", "value": round(value, 1),
-                    "low": round(max(0.0, value * (1 - rel)), 1),
-                    "high": round(value * (1 + rel), 1), "n": lobby["n"], "source": "closed lobby",
+            return {"ok": True, "shape_source": "lobby", "value": tenth(value),
+                    "low": tenth(max(0.0, value * (1 - rel))),
+                    "high": tenth(value * (1 + rel)), **({"rel": rel} if exact else {}),
+                    "n": lobby["n"], "source": "closed lobby",
                     "games": int(tournament.get("max_games") or 0), "field": field,
                     "share": round(100 * rank / field, 2), "guessed_field": guessed,
                     "field_effect": 0.0, "level": round(value, 1), "ref_rank": rank}
@@ -1263,9 +1275,10 @@ def predict_from_model(model: dict, tournament: dict) -> dict | None:
     if replay and (not top or top["source"] not in ("category", "family")):
         value, rel = replay["value"], replay["rel"]
         slope = field_sensitivity(rank, field, curve)
-        return {"ok": True, "shape_source": replay["shape_source"], "value": round(value, 1),
-                "low": round(max(0.0, value * (1 - rel)), 1),
-                "high": round(value * (1 + rel), 1), "n": replay["n"], "source": "re-scored boards",
+        return {"ok": True, "shape_source": replay["shape_source"], "value": tenth(value),
+                "low": tenth(max(0.0, value * (1 - rel))),
+                "high": tenth(value * (1 + rel)), **({"rel": rel} if exact else {}),
+                "n": replay["n"], "source": "re-scored boards",
                 "games": int(tournament.get("max_games") or 0), "field": field,
                 "share": round(100 * rank / field, 2), "guessed_field": guessed,
                 "field_effect": round(100 * slope * model["spread"]["field_probe"], 1) if rank > replay["deep"] else 0.0,
@@ -1293,9 +1306,10 @@ def predict_from_model(model: dict, tournament: dict) -> dict | None:
     return {
         "ok": True,
         "shape_source": shape_source,
-        "value": round(value, 1),
-        "low": round(max(0.0, value * (1 - rel)), 1),
-        "high": round(value * (1 + rel), 1),
+        "value": tenth(value),
+        "low": tenth(max(0.0, value * (1 - rel))),
+        "high": tenth(value * (1 + rel)),
+        **({"rel": rel} if exact else {}),
         "n": top["n"],
         "source": source,
         "games": int(tournament.get("max_games") or 0),

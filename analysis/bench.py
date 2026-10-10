@@ -54,11 +54,13 @@ page asks first (`export_model.default_cut`) and every rank past 1,000 the
 final standings hold, each where the final standings hold it.
 
 The error is a ratio to the result, as in `coldbench`: 100 (forecast / result
-- 1), positive when the forecast said more than the cup took. The ranges are
-built the page's way, from the model's `quality.bands` in units of the
-half-width, the inner one claiming half of the results and the outer nine in
-ten, with their ends unrounded where the page prints whole numbers; every
-model carries the bands of today's `analysis/validation.json`, in part
+- 1), positive when the forecast said more than the cup took. The numbers are
+the page's: `predict_from_model` is asked for them unrounded (`unrounded` in
+the form), the export's tenth left out, and `rel` is the model's own. The
+ranges are built the page's way, from the model's `quality.bands` in units
+of the half-width, the inner one claiming half of the results and the outer
+nine in ten, and hold a result when it falls inside their ends as the page
+prints them, whole numbers (Math.round); every model carries the bands of today's `analysis/validation.json`, in part
 measured on the same cups. A bias is a group of forecasts that leans one way
 on three family-days out of four at least, over two dates or more (a family
 played the same evening in seven regions is one draw, not seven), and its cost
@@ -81,6 +83,7 @@ the field it drew, are shown but never offered as biases.
     python -m analysis.bench --cold --variant ../ideas/my_idea.py   today's code and a variant of it, side by side
     python -m analysis.bench --compare data/a.json data/b.json   two runs written with --json, side by side
     python -m analysis.bench --live --weeks 3         the forecast during each cup (analysis/bench_live.py)
+    python -m analysis.bench --live --variant ../ideas/my_idea.py   the same, point by point against a variant
 
 `--jobs` prices the models' cutoffs in that many processes, each with its own
 read-only connection; the forecasts, the counts and the file written are the
@@ -148,6 +151,17 @@ for _path in (_CODE, _ROOT):
     if _path not in sys.path:
         sys.path.insert(0, _path)
 
+# Run as `python -m analysis.bench` (or as a file), this module is `__main__`,
+# and `__mp_main__` in the processes `--jobs` spawns: it is made the package's
+# `analysis.bench` too, so that a variant which replaces one of its functions
+# (`from analysis import bench; bench.price = ...`) replaces it in the code that
+# runs, not in a second copy imported beside it.
+if __name__ in ("__main__", "__mp_main__"):
+    import analysis as _package  # noqa: E402
+
+    if os.path.dirname(os.path.abspath(_package.__file__)) == os.path.dirname(os.path.abspath(__file__)):
+        sys.modules["analysis.bench"] = _package.bench = sys.modules[__name__]
+
 import calendar_snapshot  # noqa: E402
 import calibration  # noqa: E402
 import db  # noqa: E402
@@ -183,9 +197,10 @@ CACHE_DAYS = 14
 # Windows waits on 63 handles at most, two of them the pool's own: the most
 # processes `--jobs` runs there.
 WINDOWS_JOBS = 61
-# The app's modules a variant makes its replacements on: each time it is
-# applied, they are put back after as they were before.
-VARIANT_MODULES = ("export_model", "calibration", "predict", "rescore", "db", "calendar_snapshot")
+# The modules a variant makes its replacements on, the app's and the
+# bench's: each time it is applied, they are put back after as they were before.
+VARIANT_MODULES = ("export_model", "calibration", "predict", "rescore", "db", "calendar_snapshot",
+                   "analysis.bench", "analysis.bench_live", "analysis.live")
 
 RANK_BANDS = ((1, 10), (11, 25), (26, 100), (101, 250), (251, 500), (501, 1000),
               (1001, 2500), (2501, 10 ** 9))
@@ -622,7 +637,7 @@ def price(conn, model: dict, comp: dict, catalogue: dict, cutoff: str, starts: d
     bands = (model.get("quality") or {}).get("bands") or None
     out = []
     for rank in sorted(r for r in wanted if r in finals):
-        got = export_model.predict_from_model(model, dict(t, rank=rank))
+        got = export_model.predict_from_model(model, dict(t, rank=rank, unrounded=True))
         if not got or not got.get("ok") or not got.get("value"):
             refused[refusal(got)] += 1
             continue
@@ -638,7 +653,7 @@ def price(conn, model: dict, comp: dict, catalogue: dict, cutoff: str, starts: d
             "lobby": lobby, "round_day": round_day(comp.get("window_id")), "first_week": first_week,
             "season": season, "input": source,
             "rank": rank, "cut": cut_rank, "at_cut": rank == cut_rank,
-            "forecast": value, "rel": max(0.0, float(got["high"]) / value - 1) if value > 0 else 0.0,
+            "forecast": value, "rel": exact_rel(got),
             "result": finals[rank], "bands": bands,
             "source": got.get("source") or "", "shape_source": got.get("shape_source") or "",
             "guessed_field": got.get("guessed_field") or "", "field": field,
@@ -647,6 +662,16 @@ def price(conn, model: dict, comp: dict, catalogue: dict, cutoff: str, starts: d
             "later_day": int(got.get("later_day") or 0), "cold": bool(t.get("cold")),
         })
     return out
+
+
+def exact_rel(got: dict) -> float:
+    """The forecast's own `rel`, as the page reads it off the model; for an
+    answer that does not carry it (a variant's own), the one its upper end
+    gives."""
+    if got.get("rel") is not None:
+        return max(0.0, float(got["rel"]))
+    value = float(got.get("value") or 0)
+    return max(0.0, float(got["high"]) / value - 1) if value > 0 else 0.0
 
 
 # --------------------------------------------------------------------------- #
@@ -765,7 +790,7 @@ def tables(pairs: list[dict]) -> dict:
         grouped: dict = {}
         for p in pairs:
             grouped.setdefault(cut(p), []).append(p)
-        out[name] = {str(value): coldbench.summary(members) for value, members in
+        out[name] = {str(value): coldbench.summary(members, shown=True) for value, members in
                      sorted(grouped.items(), key=lambda kv: (-len(kv[1]), str(kv[0])))}
     return out
 
@@ -779,8 +804,8 @@ def report(pairs: list[dict], heading: str) -> tuple[dict, list[dict]]:
         return {}, []
     print("  error in % of the result, + when the forecast said more than the cup took;"
           " the ranges are the page's")
-    coldbench.print_table("all", [("all ranks", coldbench.summary(pairs)),
-                                  ("at the cut", coldbench.summary([p for p in pairs if p["at_cut"]]))])
+    coldbench.print_table("all", [("all ranks", coldbench.summary(pairs, shown=True)),
+                                  ("at the cut", coldbench.summary([p for p in pairs if p["at_cut"]], shown=True))])
     found = tables(pairs)
     for name, rows in found.items():
         shown = list(rows.items())
@@ -820,8 +845,12 @@ class Variant:
 
     The file defines `apply()`, which makes its replacements on the app's
     modules (`export_model.predict_from_model = ...`, the modules imported by
-    their own names, as the app imports them) and returns a function that puts
-    them back, or None when nothing needs putting back:
+    their own names, as the app imports them) or on the bench's own
+    (`from analysis import bench; bench.price = ...`, the same for
+    `analysis.bench_live` and `analysis.live`), and returns a function that
+    puts them back, or None when nothing needs putting back. The bench's
+    module is the one that runs, however the bench was started
+    (`python -m analysis.bench` included) and in every process of `--jobs`:
 
         import export_model
 
@@ -851,8 +880,9 @@ class Variant:
     the text read then, whose SHA-1 the run writes, in this process and in
     every other: an edit to the file during a run reaches the next run only.
     Each time it is applied, the text is run afresh and the app's modules
-    (VARIANT_MODULES) are put back after as they were before, whatever
-    `apply()` returned.
+    and the bench's (VARIANT_MODULES) are put back after as they were before,
+    whatever `apply()` returned. A model is the same with the file applied
+    when it differs only by the date it was built on (`same_model`).
     """
 
     def __init__(self, path: str, source: bytes | None = None):
@@ -1089,12 +1119,19 @@ def cold(conn, since: str, until: str, catalogue: dict, cache: str | None, key: 
 def same_model(conn, cutoff: str, cache: str | None, key: str, variant: Variant) -> bool:
     """Does the variant leave the model of `cutoff` as today's code builds it?
     Asked of a variant that says so before its run reads today's models: the
-    model is built again with the variant applied, and set against today's."""
+    model is built again with the variant applied, and set against today's.
+    The date a model was built on (its `generated`) is not part of it: a model
+    read from the cache was built on another day than the one built here."""
     with contextlib.redirect_stdout(io.StringIO()):
         plain = Models(conn, export_model.load_competitions(conn), key, cache).get(cutoff)
         with variant.applied():
             changed = Models(conn, export_model.load_competitions(conn), key, None).get(cutoff)
-    return plain == changed
+    return undated(plain) == undated(changed)
+
+
+def undated(model):
+    """The model without the date it was built on."""
+    return {k: v for k, v in model.items() if k != "generated"} if isinstance(model, dict) else model
 
 
 def argument_parser() -> argparse.ArgumentParser:
@@ -1107,6 +1144,11 @@ def argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--arrival", default="feed", metavar="feed|stamp|MINUTES",
                         help="with --live, when a reading reaches the page: after the feed's pass that could "
                              "take it (default), at its stamp, or this many minutes after its stamp")
+    parser.add_argument("--old-cadence", action="store_true",
+                        help="with --live and --arrival feed, the readings since the feed's change of 4 October "
+                             "2026 brought back to its cadence before, to compare two periods")
+    parser.add_argument("--skip-outages", action="store_true",
+                        help="with --live, leave out the cups an outage of the feed touched (marked otherwise)")
     parser.add_argument("--weeks", type=int, default=0, help="the span, in weeks back from --until")
     parser.add_argument("--days", type=int, default=0, help=f"the span, in days (default {SHORT_DAYS})")
     parser.add_argument("--since", default="", help="the first day (YYYY-MM-DD)")
@@ -1220,15 +1262,16 @@ def main(argv: list[str] | None = None) -> int:
         # The live bench has its own loop: what only the cold one does is
         # refused, not dropped, so that no run passes for what it is not.
         cold_only = [name for name, asked in (("--cutoff published", args.cutoff == "published"),
-                                              ("--jobs", args.jobs > 1), ("--variant", bool(args.variant)))
-                     if asked]
+                                              ("--jobs", args.jobs > 1)) if asked]
         if cold_only:
             print(f"{', '.join(cold_only)}: the cold bench's, not the live bench's (--live). Nothing measured.")
             return 2
         from analysis import bench_live
         return bench_live.run(args)
-    if args.arrival != "feed":
-        print("--arrival is the live bench's (--live), not the cold bench's. Nothing measured.")
+    live_only = [name for name, asked in (("--arrival", args.arrival != "feed"), ("--old-cadence", args.old_cadence),
+                                          ("--skip-outages", args.skip_outages)) if asked]
+    if live_only:
+        print(f"{', '.join(live_only)}: the live bench's (--live), not the cold bench's. Nothing measured.")
         return 2
     path = args.db or db.DB_PATH
     if not os.path.exists(path):
@@ -1376,8 +1419,8 @@ def run_json(args, run: dict, tables: tuple, since: str, until: str, path: str, 
         "leaderboards": {"events": events}, "replays": run["replays"], "bands": run["bands"],
         "model_key": run["model_key"], "ranks": list(RANKS), "cups": run["cups"],
         "models": run["models"], "skipped": dict(run["skipped"]), "refused": dict(run["refused"]),
-        "all": coldbench.summary(pairs) if pairs else None,
-        "at_cut": coldbench.summary([p for p in pairs if p["at_cut"]]) if pairs else None,
+        "all": coldbench.summary(pairs, shown=True) if pairs else None,
+        "at_cut": coldbench.summary([p for p in pairs if p["at_cut"]], shown=True) if pairs else None,
         "tables": found, "biases": leaning, "pairs": pairs,
     }
     if commits:

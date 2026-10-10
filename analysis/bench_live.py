@@ -29,20 +29,30 @@ more:
 When a reading reached the page (`--arrival`):
 
 - `feed`, the default: the page's own account of the feed (app.html,
-  `drawStatus`; worker.js, QUICK_BEFORE and `endgame`). The cron fires every
-  five minutes; the full pass, which reads the pages the cuts fall on as well
-  as the first, runs on the ten-minute marks; the quick pass in between reads
-  the first page only (the top hundred), and only of the windows in their
-  endgame, from ENDGAME_BEFORE minutes before the close on. A reading lands
-  LANDS_AFTER minutes after its pass. A reading's stamp is the API's
-  `updatedAt` of its page, never later than the pass that took it, so the
-  reading is taken to land after the first pass at or after its stamp that
-  could have read it: a five-minute mark if the window was in its endgame by
-  then and the reading holds first-page ranks only, else a ten-minute mark.
-  This is a model, not a record: the database keeps the stamp, not the pass,
-  and a stamp is cut to the minute, so a board stamped a few seconds after a
-  mark is taken to land with that mark's pass. A pass that failed or ran late
-  is not seen either.
+  `drawStatus`; worker.js, QUICK_BEFORE, QUICK_AFTER, `endgame` and `cycle`),
+  which ran two ways. Until FEED_CHANGE (4 October 2026, 16:45 UTC) the cron
+  fired every five minutes; the full pass, which reads the pages the cuts fall
+  on as well as the first, ran on the ten-minute marks; the quick pass in
+  between read the first page only (the top hundred), and only of the windows
+  in their endgame, from ENDGAME_BEFORE minutes before the close on. Since
+  then the full pass runs on every five-minute mark, and from ENDGAME_BEFORE
+  minutes before a window's close to ENDGAME_AFTER minutes after it the same
+  firing looks again at the minutes LOOK_MINUTES past its mark, at the first
+  page and the pages the cuts fall on. A reading lands LANDS_AFTER minutes
+  after its pass. A reading's stamp is the API's `updatedAt` of its page,
+  never later than the pass that took it, so the reading is taken to land
+  after the first pass at or after its stamp that could have read it, under
+  the rules of the feed as it ran at its stamp. This is a model, not a
+  record: the database keeps the stamp, not the pass, and a stamp is cut to
+  the minute, so a board stamped a few seconds after a mark is taken to land
+  with that mark's pass. A pass that failed or ran late is not seen either.
+  `--old-cadence` reads the readings stamped since FEED_CHANGE as the feed
+  of before would have taken them: on its marks only, the latest reading
+  each of its passes could take and no other, so that two periods compare.
+  On the evenings the feed was down (FEED_OUTAGES, Paris time) only readings
+  of the cups' ends got through, the first page alone: every cup whose
+  window, or the twenty minutes past it, overlaps one is marked (`outage`),
+  and `--skip-outages` leaves them out.
 - `stamp`: at its stamp, sooner than any pass could have read it: the most
   the page could have had.
 - a number of minutes: that long after its stamp.
@@ -82,9 +92,12 @@ cut the page asks first, each where the final standings hold it. The ranks the
 feed read are gathered over all of a cup's readings, later ones included, and
 priced at every point: which ranks are priced is chosen after the fact, but no
 number read after a point reaches its forecast. The error is 100 (forecast /
-result - 1), as on the cold bench; the ranges are counted as holding the
-result when it falls inside them as they are written to the JSON (to a
-thousandth of a point), ends included. The finals under SMALL_RESULT points
+result - 1), as on the cold bench. The numbers are the page's: the cold
+forecast unrounded with the model's own `rel` (`predict_from_model` asked for
+`unrounded`), and the forecast and its ranges written as computed; the ranges
+are counted as holding the result when it falls inside them as the page
+prints their ends, whole numbers rounded the way JavaScript's Math.round
+does, ends included. The finals under SMALL_RESULT points
 are counted apart beside every table, with the mean error without them: a
 point or two off a final of six weighs on a mean out of all proportion.
 
@@ -158,6 +171,19 @@ ARRIVAL_RULES = {
     "stamp": "at its stamp",
     "minutes": "%s min after its stamp",
 }
+# Since FEED_CHANGE (UTC), the worker of 4 October: a full pass on every
+# five-minute mark and, from ENDGAME_BEFORE minutes before a window's close
+# to ENDGAME_AFTER minutes after it, looks at the first page and the cuts'
+# pages LOOK_MINUTES past each mark (worker.js, `cycle`, STEP_MS, CYCLE_MS).
+FEED_CHANGE = datetime(2026, 10, 4, 16, 45)
+NEW_FULL_PASS_MINUTES = 5
+LOOK_MINUTES = (1, 2, 3)
+ENDGAME_AFTER = 20
+# The evenings the feed's full passes did not get through (Paris time, start
+# and end): only readings of the cups' ends, the first page alone, did.
+FEED_OUTAGES = (("2026-09-19 20:30", "2026-09-20 18:45"), ("2026-10-03 20:10", "2026-10-04 00:20"),
+                ("2026-10-04 14:20", "2026-10-04 16:00"))
+OUTAGE_AFTER = 20             # minutes past a window's close it is still measured
 EARLY_MINUTES = 10            # a reading stamped this long before the opening is another window's
 SMALL_RESULT = 10             # a final under this many points is counted apart
 
@@ -173,12 +199,23 @@ FLAGS = OrderedDict([
     ("fncs", "live.py tells an FNCS qualifier off the name alone; the page off the name and the category"),
     ("minutes", "live.py rounds the window's length to 5 minutes before matching a pace row; "
                 "the page matches the length itself"),
+    ("empty", "live.py reads an empty pace curve or tail of the cup's kind or family as none and takes the "
+              "pooled one; the page reads the share as it is"),
     ("other", "live.py and the page part ways for another reason"),
 ])
 
 
 def js_round(x: float) -> int:
     return export_model.js_round(x)
+
+
+def js_or(*values):
+    """`a || b || ...` as JavaScript reads it: the first value it holds true,
+    else the last. An empty object or list is true there, None, 0 and "" not."""
+    for value in values[:-1]:
+        if isinstance(value, (dict, list)) or value:
+            return value
+    return values[-1]
 
 
 def moment(text) -> datetime | None:
@@ -217,29 +254,80 @@ def arrival_label(arrival) -> str:
     return arrival if isinstance(arrival, str) else f"stamp + {arrival} min"
 
 
-def landed(begin: datetime, end: datetime | None, minute: float, ranks, arrival="feed") -> float:
+def landed(begin: datetime, end: datetime | None, minute: float, ranks, arrival="feed", cuts=(),
+           old: bool = False) -> float:
     """When a reading stamped `minute` into the window reached the page, in
-    minutes from the opening (see the module's notes on `--arrival`)."""
+    minutes from the opening (see the module's notes on `--arrival`): the
+    first pass of the feed at or after its stamp that could read it, as the
+    feed ran at the stamp (as it ran before FEED_CHANGE with `old`). `cuts`
+    are the ranks of the cup's cuts, whose pages the passes read."""
     if arrival == "stamp":
         return minute
     if arrival != "feed":
         return minute + float(arrival)
-    # The cron's marks are on the clock, not on the window: whole seconds
-    # since 1970.
-    epoch = datetime(1970, 1, 1)
-    opens = round((begin - epoch).total_seconds())
-    stamp = opens + round(minute * 60)
-    quick, full = (-(-stamp // (60 * every)) * 60 * every for every in (QUICK_PASS_MINUTES, FULL_PASS_MINUTES))
-    endgame = (end - epoch).total_seconds() - ENDGAME_BEFORE * 60 if end else math.inf
-    taken = quick if quick >= endgame and all(int(r) <= FIRST_PAGE for r in ranks) else full
-    return (taken - opens) / 60 + LANDS_AFTER
+    return (feed_pass(begin, end, minute, ranks, cuts, old) - whole_seconds(begin)) / 60 + LANDS_AFTER
+
+
+def whole_seconds(at: datetime) -> int:
+    """A UTC time as whole seconds since 1970: the cron's marks are on the
+    clock, not on the window."""
+    return round((at - datetime(1970, 1, 1)).total_seconds())
+
+
+def regime_of(begin: datetime, minute: float, old: bool = False) -> str:
+    """"before" or "since" FEED_CHANGE, for a reading stamped `minute` into a
+    window that opened at `begin` ("before" for every reading with `old`)."""
+    stamp = whole_seconds(begin) + round(minute * 60)
+    return "before" if old or stamp < whole_seconds(FEED_CHANGE) else "since"
+
+
+def feed_pass(begin: datetime, end: datetime | None, minute: float, ranks, cuts=(), old: bool = False) -> int:
+    """The pass of the feed that took a reading stamped `minute` into the
+    window, in whole seconds since 1970 (see `landed`)."""
+    stamp = whole_seconds(begin) + round(minute * 60)
+    closes = whole_seconds(end) if end else None
+
+    def mark(every: int) -> int:
+        return -(-stamp // (60 * every)) * 60 * every
+
+    if regime_of(begin, minute, old) == "before":
+        quick, full = mark(QUICK_PASS_MINUTES), mark(FULL_PASS_MINUTES)
+        endgame = closes - ENDGAME_BEFORE * 60 if closes is not None else math.inf
+        return quick if quick >= endgame and all(int(r) <= FIRST_PAGE for r in ranks) else full
+    full = mark(NEW_FULL_PASS_MINUTES)
+    if closes is None:
+        return full
+    # The looks read the first page and the pages the cuts fall on only.
+    pages = {(int(c) - 1) // FIRST_PAGE for c in cuts if int(c) >= 1} | {0}
+    if not all((int(r) - 1) // FIRST_PAGE in pages for r in ranks):
+        return full
+    for look in range(-(-stamp // 60) * 60, full, 60):
+        if (look // 60) % NEW_FULL_PASS_MINUTES in LOOK_MINUTES \
+                and closes - ENDGAME_BEFORE * 60 <= look <= closes + ENDGAME_AFTER * 60:
+            return look
+    return full
+
+
+def outage_of(begin: datetime, end: datetime | None) -> bool:
+    """Did the window, or the OUTAGE_AFTER minutes past its close, run on an
+    evening the feed was down (FEED_OUTAGES)?"""
+    last = (end or begin) + timedelta(minutes=OUTAGE_AFTER)
+    for start, stop in FEED_OUTAGES:
+        down = bench.paris_in_utc(datetime.fromisoformat(start).date(), start[11:16])
+        up = bench.paris_in_utc(datetime.fromisoformat(stop).date(), stop[11:16])
+        if begin < up and last > down:
+            return True
+    return False
 
 
 def snapshots_of(conn, comp_id: int, begin: datetime, end: datetime | None = None,
-                 arrival="stamp") -> list[dict]:
+                 arrival="stamp", cuts=(), old: bool = False) -> list[dict]:
     """The feed's readings of a cup in the order they were filed: [{minute,
     known, final, games, pages, ranked, points}], `minute` counted from the
-    window's opening and `known` the minute it reached the page (`landed`)."""
+    window's opening and `known` the minute it reached the page (`landed`).
+    With `old`, under `--arrival feed`, the readings stamped since FEED_CHANGE
+    are brought back to the feed's cadence before it: of those one pass of
+    then would have taken, the latest only."""
     out = []
     rows = conn.execute("SELECT id, ts, note, games, pages, ranked FROM snapshot WHERE competition_id = ? "
                         "AND note LIKE ? ORDER BY ts, id", (comp_id, FEED_NOTE)).fetchall()
@@ -250,11 +338,28 @@ def snapshots_of(conn, comp_id: int, begin: datetime, end: datetime | None = Non
         points = {int(r): float(p) for r, p in conn.execute(
             "SELECT rank, points FROM points WHERE snapshot_id = ? ORDER BY rank", (sid,))}
         minute = minutes_from(begin, at)
-        known = landed(begin, end, minute, points, arrival)
+        known = landed(begin, end, minute, points, arrival, cuts, old)
         out.append({"id": sid, "minute": minute, "known": known, "final": "final" in str(note or ""),
                     "games": int(games or 0), "pages": int(pages or 0), "ranked": int(ranked or 0),
                     "points": points})
+    if old and arrival == "feed":
+        out = old_cadence(out, begin)
     return out
+
+
+def old_cadence(snapshots: list[dict], begin: datetime) -> list[dict]:
+    """The readings stamped since FEED_CHANGE thinned to what the feed of
+    before would have taken: of the readings that land with one of its passes
+    (their `known`, under the old rules), and read the same pages (the first
+    alone, or more), the latest stamped only. The readings before it are kept."""
+    latest: dict = {}
+    for n, snap in enumerate(snapshots):
+        if regime_of(begin, snap["minute"]) == "since":
+            group = (snap["known"], all(int(r) <= FIRST_PAGE for r in snap["points"]))
+            if group not in latest or snap["minute"] >= snapshots[latest[group]]["minute"]:
+                latest[group] = n
+    kept = set(latest.values())
+    return [snap for n, snap in enumerate(snapshots) if regime_of(begin, snap["minute"]) == "before" or n in kept]
 
 
 def available(snapshots: list[dict], at: float, close: float, strict: bool = True) -> list[dict]:
@@ -391,7 +496,7 @@ def family_pace(pace: dict, t: dict, minutes: int, begin: datetime) -> dict | No
                 latest = None
             if latest is not None and math.floor((begin - latest).total_seconds() / 86400) > live.CAT_MAX_DAYS:
                 continue
-        return {"curve": row[1] or None, "tail": row[2] or None, "match": "category"}
+        return {"curve": js_or(row[1], None), "tail": js_or(row[2], None), "match": "category"}
     rows = (pace or {}).get("families") or []
     mode, team = str(t.get("game_mode") or ""), str(t.get("team_mode") or "")
     for want in (page_signature(t), ("", "")):
@@ -400,7 +505,7 @@ def family_pace(pace: dict, t: dict, minutes: int, begin: datetime) -> dict | No
                     and int(row[3]) == games \
                     and (str(row[8] or "") if len(row) > 9 else "", str(row[9] or "") if len(row) > 9 else "") \
                     == tuple(want):
-                return {"curve": row[4] or None, "tail": row[5] or None, "match": "family"}
+                return {"curve": js_or(row[4], None), "tail": js_or(row[5], None), "match": "family"}
     return None
 
 
@@ -439,11 +544,11 @@ class Evening:
     # The cold forecast: the page's predictOne, which is predict_from_model.
     def cold(self, rank: int) -> dict | None:
         if rank not in self._cold:
-            got = export_model.predict_from_model(self.model, dict(self.t, rank=rank))
+            got = export_model.predict_from_model(self.model, dict(self.t, rank=rank, unrounded=True))
             if got and got.get("ok") and got.get("value"):
                 value = float(got["value"])
                 self._cold[rank] = {"ok": True, "value": value, "source": got.get("source") or "",
-                                    "rel": max(0.0, float(got["high"]) / value - 1) if value > 0 else 0.0}
+                                    "rel": bench.exact_rel(got)}
             elif got and got.get("reason") == export_model.FIELD_BELOW_CUT:
                 self._cold[rank] = {"ok": False, "no_prior": True, "reason": bench.refusal(got)}
             else:
@@ -575,9 +680,11 @@ class Evening:
             return depth_at(pace, q, s)
 
         pooled_curve = (pace.get("curve") or {}).get(kind)
-        curve = (family and family.get("curve")) or pooled_curve
+        # An empty curve or tail of the cup's own is held as the page holds
+        # it, a table that gives no number: the share is then read as it is.
+        curve = js_or(family and family.get("curve"), pooled_curve)
         spread = (pace.get("dispersion") or {}).get(kind)
-        tail = (family and family.get("tail")) or (pace.get("tail") or {}).get(kind)
+        tail = js_or(family and family.get("tail"), (pace.get("tail") or {}).get(kind))
         tail_spread = (pace.get("tail_dispersion") or {}).get(kind)
         by_games = ((pace.get("games_curve") or {}).get(str(self.games)) or None) if kind == "closed_by_game" else None
         by_games_spread = ((pace.get("games_dispersion") or {}).get(str(self.games)) or None) \
@@ -587,8 +694,9 @@ class Evening:
             return js_round(s * self.games)
 
         def tail_for(rank):
-            return (family and family.get("tail")) or (
-                band_table((pace.get("tail") or {}).get("by_rank"), rank) if rank and rank >= 1 else None) or tail
+            return js_or(family and family.get("tail"),
+                         band_table((pace.get("tail") or {}).get("by_rank"), rank) if rank and rank >= 1 else None,
+                         tail)
 
         def spread_for(rank):
             return (band_table((pace.get("tail_dispersion") or {}).get("by_rank"), rank)
@@ -865,6 +973,9 @@ def cup_flags(evening: Evening, live_: dict | None) -> list[str]:
         out.append("fncs")
     if live.family_key(comp)[2] != evening.duration:
         out.append("minutes")
+    own = family_pace(evening.pace, evening.t, evening.duration, evening.begin)
+    if own and ({} in (own.get("curve"), own.get("tail")) or [] in (own.get("curve"), own.get("tail"))):
+        out.append("empty")
     return out
 
 
@@ -881,11 +992,13 @@ def settled_by_feed(snapshots: list[dict], close: float) -> dict:
 
 def price_cup(conn, model: dict, comp: dict, catalogue: dict, cutoff: str, skipped: Counter,
               refused: Counter, replayed: Counter | None = None, strict: bool = True, arrival="feed",
-              early: Counter | None = None) -> tuple[list[dict], dict]:
+              early: Counter | None = None, old: bool = False, outages: bool = True) -> tuple[list[dict], dict]:
     """Every rank of one cup the page prices, at each point of its session:
     (rows, a line about the cup). The readings stamped more than
     EARLY_MINUTES before the opening are left out, and counted in `early`
-    per window."""
+    per window. `old` brings the readings to the feed's cadence before
+    FEED_CHANGE; a cup an outage of the feed touched is marked, or left out
+    without `outages`."""
     finals = {int(r): float(v) for r, v in (comp.get("finals") or {}).items() if v and float(v) > 0}
     if not finals:
         skipped["no final standings"] += 1
@@ -913,7 +1026,12 @@ def price_cup(conn, model: dict, comp: dict, catalogue: dict, cutoff: str, skipp
     if begin is None or end is None or end <= begin:
         skipped["no window to clock the readings on"] += 1
         return [], {}
-    snapshots = snapshots_of(conn, comp["id"], begin, end, arrival)
+    down = outage_of(begin, end)
+    if down and not outages:
+        skipped["cups an outage of the feed touched (--skip-outages)"] += 1
+        return [], {}
+    cut_rank = int(cut[1]) if cut else 0
+    snapshots = snapshots_of(conn, comp["id"], begin, end, arrival, (cut_rank,) if cut_rank else (), old)
     window = f"{comp.get('event_id')}|{comp.get('window_id')}" if comp.get("event_id") else f"#{comp['id']}"
     stray = sum(1 for snap in snapshots if snap["minute"] < -EARLY_MINUTES)
     if stray:
@@ -923,7 +1041,6 @@ def price_cup(conn, model: dict, comp: dict, catalogue: dict, cutoff: str, skipp
     if not snapshots:
         skipped["no reading from the feed"] += 1
         return [], {}
-    cut_rank = int(cut[1]) if cut else 0
     read_ranks = {rank for snap in snapshots for rank in snap["points"]}
     wanted = sorted(r for r in (set(bench.RANKS) | read_ranks | ({cut_rank} if cut_rank else set())) if r in finals)
     evening = Evening(model, t, begin, end, lobby)
@@ -932,7 +1049,13 @@ def price_cup(conn, model: dict, comp: dict, catalogue: dict, cutoff: str, skipp
     base = {"window": window, "id": comp["id"], "name": comp.get("name") or "",
             "family": comp.get("family") or comp.get("kind") or "",
             "region": comp.get("region") or "", "model": cutoff, "input": source, "lobby": lobby,
-            "day": str(comp.get("start_time") or "")[:10], "cut": cut_rank}
+            "day": str(comp.get("start_time") or "")[:10],
+            "local_day": bench.local_day(comp.get("start_time"), comp.get("region")),
+            # The season as the cold bench reads it: the database's, else the event's.
+            "season": calibration.season_number(comp.get("season"))
+            or export_model.season_of_event(comp.get("event_id")),
+            "cut": cut_rank,
+            "outage": down}
     rows, reasons_seen, deepest = [], set(), 0.0
     for label, share, past in POINTS:
         at = point_minute(evening, share, past)
@@ -951,9 +1074,9 @@ def price_cup(conn, model: dict, comp: dict, catalogue: dict, cutoff: str, skipp
                 refused[bench.refusal(ev.cold(rank)) if ev.cold(rank) else "no answer"] += 1
                 continue
             theirs = ev.forecast(rank, page)
-            # The ranges as written, and whether they hold the result as
-            # written: the JSON gives back every flag.
-            near, wide = ([round(x, 3) for x in band] if band else None for band in ev.bands(got))
+            # The ranges as the page computes them, and whether they hold the
+            # result as the page prints their ends (whole numbers).
+            near, wide = ev.bands(got)
             result = finals[rank]
             q = rank / mine["field"] if mine and mine["field"] else None
             differs = theirs is None or abs(theirs["value"] - got["value"]) > 1e-9 * max(1.0, got["value"])
@@ -964,14 +1087,13 @@ def price_cup(conn, model: dict, comp: dict, catalogue: dict, cutoff: str, skipp
                 "live_share": round(mine["share"], 4) if mine else None,
                 "live_after": round(mine["after"], 2) if mine else None,
                 "rank": rank, "at_cut": rank == cut_rank,
-                "forecast": round(got["value"], 4), "result": result,
+                "forecast": got["value"], "rel": got["rel"], "floor": got.get("floor") or 0, "result": result,
                 "error": round(100 * (got["value"] / result - 1), 4),
-                "near": near, "wide": wide,
-                "in_50": bool(near and near[0] <= result <= near[1]), "in_90": wide[0] <= result <= wide[1],
+                "near": near, "wide": wide, "in_50": holds(near, result), "in_90": holds(wide, result),
                 "live_ranges": bool(ev.live_bands(got.get("live"))), "basis": got["basis"],
                 "rung": cold["source"] if cold and cold.get("ok")
                 else "none: " + str((cold or {}).get("reason") or ""),
-                "cold": round(cold["value"], 4) if cold and cold.get("ok") else None,
+                "cold": cold["value"] if cold and cold.get("ok") else None,
                 "field": mine["field"] if mine else 0,
                 "field_from": ("typed" if mine["typed"] else "counted" if mine["counted"] else "guessed")
                 if mine else "no live answer",
@@ -985,12 +1107,19 @@ def price_cup(conn, model: dict, comp: dict, catalogue: dict, cutoff: str, skipp
             }))
     line = {"id": comp["id"], "window": base["window"], "region": base["region"], "family": base["family"],
             "lobby": lobby, "snapshots": len(snapshots), "early": stray, "ranks": len(wanted), "cut": cut_rank,
+            "outage": down,
             "pace_from": "page rules (closed lobby)" if lobby else "live.py",
             # Why live.py could read this cup otherwise than the page, at some
             # point of its session, and how many of its forecasts it moved.
             "reasons": sorted(reasons_seen), "moved": sum(1 for r in rows if r["flags"]),
             "deepest_q": round(deepest, 4)}
     return rows, line
+
+
+def holds(ends: list | None, result: float) -> bool:
+    """Does a range hold the result, its ends as the page prints them: whole
+    numbers, rounded the way JavaScript's Math.round does (halves up)."""
+    return bool(ends) and js_round(ends[0]) <= result <= js_round(ends[1])
 
 
 def feed_cups(conn, comps: list[dict], since: str, until: str) -> list[dict]:
@@ -1001,9 +1130,11 @@ def feed_cups(conn, comps: list[dict], since: str, until: str) -> list[dict]:
 
 
 def measure(conn, since: str, until: str, catalogue: dict, cache: str | None, key: str, by: str = "update",
-            progress: bool = True, updates: tuple = bench.UPDATES, strict: bool = True, arrival="feed") -> dict:
+            progress: bool = True, updates: tuple = bench.UPDATES, strict: bool = True, arrival="feed",
+            old: bool = False, outages: bool = True) -> dict:
     """Every cup the feed followed in [since, until), replayed from the model
-    before it, each reading landing as `arrival` has it. {"rows", "cups",
+    before it, each reading landing as `arrival` has it (`old` and `outages`:
+    see `price_cup`). {"rows", "cups",
     "lines", "skipped", "refused", "early", "models", "built", "read",
     "model_key", "replays", "live_pages", "bands", "pace", "blend"}."""
     comps = export_model.load_competitions(conn)
@@ -1051,7 +1182,7 @@ def measure(conn, since: str, until: str, catalogue: dict, cache: str | None, ke
             before = len(rows)
             for comp in sorted(targets[cutoff], key=lambda c: (str(c.get("start_time")), c["id"])):
                 got, line = price_cup(conn, model, comp, catalogue, cutoff, skipped, refused, replayed, strict,
-                                      arrival, early)
+                                      arrival, early, old, outages)
                 rows += got
                 if line:
                     lines.append(line)
@@ -1190,16 +1321,33 @@ def write_json(path: str, payload: dict, rows: list[dict]) -> None:
 
 def run(args) -> int:
     """`python -m analysis.bench --live`, with the cold bench's options but
-    --cutoff published, --jobs and --variant, which `bench.main` refuses."""
+    --cutoff published and --jobs, which `bench.main` refuses. With
+    `--variant`, the same cups are replayed a second time with the file's
+    replacements applied (see `bench.Variant`: it may replace functions of
+    this module, of `analysis.live` or of the app, or the pace and blend
+    tables a model carries, cutoff by cutoff, by replacing
+    `export_model.build_model`), written beside the first and set against it,
+    point by point (`bench_compare.compare_live`)."""
     try:
         arrival = arrival_of(getattr(args, "arrival", "feed"))
     except ValueError:
         print(f"--arrival takes feed, stamp or a whole number of minutes, not {args.arrival!r}")
         return 2
+    old, outages = bool(getattr(args, "old_cadence", False)), not getattr(args, "skip_outages", False)
+    if old and arrival != "feed":
+        print("--old-cadence reads the passes of the feed: with --arrival feed only. Nothing measured.")
+        return 2
     path = args.db or bench.db.DB_PATH
     if not os.path.exists(path):
         print(f"No database at {path}: nothing measured.")
         return 0
+    variant = None
+    if getattr(args, "variant", ""):
+        try:
+            variant = bench.Variant(args.variant)
+        except (OSError, ValueError, SyntaxError) as exc:
+            print(f"No variant from {args.variant}: {exc}")
+            return 2
     since, until = bench.span_of(args)
     cache = None if args.cache.lower() == "none" else (
         args.cache or os.path.join(tempfile.gettempdir(), "fortnite-tracker-bench"))
@@ -1211,7 +1359,10 @@ def run(args) -> int:
              else "the tournaments started before its day")
     print(f"Live bench, cups the feed followed from {since} to {until} (not included), "
           f"each priced from the model of {which}")
-    print(f"  a reading reaches the page: {ARRIVAL_RULES.get(arrival) or ARRIVAL_RULES['minutes'] % arrival}")
+    print(f"  a reading reaches the page: {ARRIVAL_RULES.get(arrival) or ARRIVAL_RULES['minutes'] % arrival}"
+          + (f"; from {FEED_CHANGE:%Y-%m-%d %H:%M} UTC, under the feed's rules since then"
+             + (", brought back to its cadence before (--old-cadence)" if old else "") if arrival == "feed" else ""))
+    print(f"  the cups an outage of the feed touched are {'marked' if outages else 'left out (--skip-outages)'}")
     print(f"  database {path}; catalogue: {len(catalogue):,} windows"
           + ("" if catalogue else " - every cup is priced off its database row"))
     print(f"  raw leaderboard pages: {events:,} events in {boards}")
@@ -1221,18 +1372,67 @@ def run(args) -> int:
     key = bench.model_key(path)
     conn = bench.open_read_only(path, live=bench.same_file(path, str(bench.db.DB_PATH)))
     conn.row_factory = sqlite3.Row
-    began = time.time()
     kept_boards, kept_raw = rescore.RAW, harvest_osirion.RAW
     rescore.RAW, harvest_osirion.RAW = boards, os.path.dirname(boards)
+    read = dict(since=since, until=until, path=path, catalogue=catalogue, events=events, arrival=arrival, old=old,
+                outages=outages, cache=cache)
+    payloads = []
     try:
-        found = measure(conn, since, until, catalogue, cache, key, args.cutoff, updates=args.update, arrival=arrival)
+        began = time.time()
+        found = measure(conn, since, until, catalogue, cache, key, args.cutoff, updates=args.update, arrival=arrival,
+                        old=old, outages=outages)
+        payloads.append(shown(args, found, time.time() - began, "", **read))
+        if args.json:
+            write_json(args.json, payloads[-1], found["rows"])
+            print(f"\nWrote {args.json}")
+        if variant is not None:
+            alone = f"today's run alone is written ({args.json})" if args.json else "today's run alone is shown"
+            if args.json and os.path.exists(bench.variant_json(args.json)):
+                os.remove(bench.variant_json(args.json))
+            try:
+                last = max(found["models"], default="")
+                if last and not variant.changes_model and not bench.same_model(conn, last, cache, key, variant):
+                    print(f"\n{variant.path} says it leaves the models alone (CHANGES_MODEL = False), but the model "
+                          f"of {last} is not the same with it: no run of the variant, {alone}.")
+                    return 2
+                print(f"\nThe same cups with the variant {variant.path} (SHA-1 {variant.sha1[:12]}), "
+                      + ("its own models" if variant.changes_model else "today's models"))
+                began = time.time()
+                with variant.applied():
+                    changed = measure(conn, since, until, catalogue, cache, variant.key(key), args.cutoff,
+                                      updates=args.update, arrival=arrival, old=old, outages=outages)
+                payloads.append(dict(shown(args, changed, time.time() - began, "variant: ", **read),
+                                     variant={"path": os.path.basename(variant.path), "sha1": variant.sha1}))
+            except (Exception, SystemExit) as exc:
+                import traceback
+                traceback.print_exc()
+                print(f"\nThe variant's run failed ({type(exc).__name__}: {exc}): {alone}.")
+                return 1
+            if args.json:
+                write_json(bench.variant_json(args.json), payloads[-1], changed["rows"])
+                print(f"\nWrote {bench.variant_json(args.json)}")
     finally:
         rescore.RAW, harvest_osirion.RAW = kept_boards, kept_raw
         conn.close()
+    if len(payloads) == 2:
+        from analysis import bench_compare
+        base, other = ({**p, "forecasts": r} for p, r in zip(payloads, (found["rows"], changed["rows"])))
+        try:
+            result = bench_compare.compare_live(base, other)
+        except ValueError as exc:
+            print(f"\nThe two runs are not set against each other: {exc}")
+            return 2
+        bench_compare.print_live_report(result)
+    return 0
+
+
+def shown(args, found: dict, seconds: float, mark: str, since: str, until: str, path: str, catalogue: dict,
+          events: int, arrival, old: bool, outages: bool, cache: str | None) -> dict:
+    """Print what a run counted and its tables, `mark` before a variant's;
+    what `--json` writes of it, but for its forecasts."""
     rows = found["rows"]
-    print(f"\n{found['cups']} cups the feed followed, {len(found['lines'])} replayed, {len(rows)} forecasts, "
-          f"{found['built']} models built and {found['read']} read from {cache or 'nowhere'}, "
-          f"in {time.time() - began:.0f} s")
+    print(f"\n{mark}{found['cups']} cups the feed followed, {len(found['lines'])} replayed, {len(rows)} forecasts, "
+          f"{found['built']} models built and {found['read']} read from {cache or 'nowhere'}, in {seconds:.0f} s")
     replays = found["replays"]
     print(f"Replayed tables on {replays['cups']} cups; {replays['cups_short_of_boards']} more asked for one and found "
           f"fewer than two usable boards. Boards: {replays['boards_with_pages']} with pages of "
@@ -1249,65 +1449,74 @@ def run(args) -> int:
     print(f"Readings stamped more than {EARLY_MINUTES} min before their window opened, left out: "
           f"{early['readings']} on {early['cups']} cups"
           + (f" ({', '.join(early['windows'])})" if early["cups"] else ""))
+    down = sorted({line["window"] for line in found["lines"] if line.get("outage")})
+    print(f"Cups an outage of the feed touched: {len(down)} replayed and marked"
+          + ("" if outages else f"; {found['skipped'].get('cups an outage of the feed touched (--skip-outages)', 0)}"
+                                " left out"))
     for title, counted in (("Cups and forecasts left out:", found["skipped"]),
                            ("Forecasts refused by the model:", found["refused"])):
         if counted:
             print(f"\n{title}")
             for why, n in counted.most_common():
                 print(f"  {n:>6}  {why}")
+    told = arrival_label(arrival) + (", old cadence" if old else "")
     print("\n" + "=" * 96)
-    print(f"  live: the forecast the page shows during each cup ({since} to {until}, cutoff: {args.cutoff}, "
-          f"arrival: {arrival_label(arrival)})")
+    print(f"  {mark}live: the forecast the page shows during each cup ({since} to {until}, cutoff: {args.cutoff}, "
+          f"arrival: {told})")
     print("=" * 96)
+    found_tables, flagged = (tables(rows), flag_summary(rows, found["lines"])) if rows else ({}, {})
     if not rows:
         print("  nothing to measure")
-        return 0
-    found_tables = tables(rows)
-    print_tables(found_tables, rows)
-    flagged = flag_summary(rows, found["lines"])
-    print("\nwhere live.py and the page part ways: cups it holds for / cups and forecasts it moved"
-          " (the number measured is live.py's)")
-    for flag, meaning in FLAGS.items():
-        f = flagged[flag]
-        print(f"  {flag:<8}{f['cups']:>5}{f['cups_moved']:>5}{f['forecasts']:>7}   {meaning}")
-    if args.json:
-        payload = {
-            "generated": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%MZ"),
-            "bench": "live", "since": since, "until": until, "cutoff": args.cutoff,
-            "update": {"paris": list(args.update), "online_after_minutes": bench.PUBLISH_MINUTES}
-            if args.cutoff == "update" else None,
-            "database": {"sha1": bench.file_sha1(path), "bytes": os.path.getsize(path),
-                         **({"wal_sha1": bench.file_sha1(path + "-wal"), "wal_bytes": os.path.getsize(path + "-wal")}
-                            if os.path.exists(path + "-wal") and os.path.getsize(path + "-wal") else {})},
-            "catalogue": {"windows": len(catalogue),
-                          "files": len(glob.glob(os.path.join(args.catalogue, "*.json.gz")))},
-            "leaderboards": {"events": events}, "replays": found["replays"], "live_pages": found["live_pages"],
-            "bands": found["bands"], "pace": found["pace"], "blend": found["blend"],
-            "model_key": found["model_key"], "ranks": list(bench.RANKS),
-            "points": [{"label": p, "share": s, "after_close": a} for p, s, a in POINTS],
-            # Two runs compare only under the same arrival.
-            "arrival": arrival,
-            "rule": f"readings that reached the page by the point ({arrival_label(arrival)}: "
-                    f"{ARRIVAL_RULES.get(arrival) or ARRIVAL_RULES['minutes'] % arrival}); "
-                    f"none called final before the close; none stamped more than {EARLY_MINUTES} min "
-                    f"before the opening",
-            "arrival_model": {"full_pass_minutes": FULL_PASS_MINUTES, "quick_pass_minutes": QUICK_PASS_MINUTES,
-                              "endgame_before": ENDGAME_BEFORE, "lands_after": LANDS_AFTER,
-                              "first_page": FIRST_PAGE} if arrival == "feed" else None,
-            "loads": "rebuilt from the database, one per stamp rather than one per pass of the feed: each part of "
-                     "a pass carries the pass's pages, count and final mark",
-            "ranks_priced": "every rank the feed read in any of the cup's readings, later ones included, with the "
-                            "bench's ranks and the cut: chosen after the fact, but no later number reaches a point",
-            "early": early,
-            "small_result": SMALL_RESULT,
-            "cups": found["cups"], "replayed": len(found["lines"]), "models": found["models"],
-            "skipped": dict(found["skipped"]), "refused": dict(found["refused"]),
-            "flags": {"meaning": FLAGS, "found": flagged},
-            "tables": found_tables, "lines": found["lines"],
-        }
-        write_json(args.json, payload, rows)
-        print(f"\nWrote {args.json}")
-    return 0
+    else:
+        print_tables(found_tables, rows)
+        print("\nwhere live.py and the page part ways: cups it holds for / cups and forecasts it moved"
+              " (the number measured is live.py's)")
+        for flag, meaning in FLAGS.items():
+            f = flagged[flag]
+            print(f"  {flag:<8}{f['cups']:>5}{f['cups_moved']:>5}{f['forecasts']:>7}   {meaning}")
+    return {
+        "generated": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%MZ"),
+        "bench": "live", "since": since, "until": until, "cutoff": args.cutoff,
+        "update": {"paris": list(args.update), "online_after_minutes": bench.PUBLISH_MINUTES}
+        if args.cutoff == "update" else None,
+        "database": {"sha1": bench.file_sha1(path), "bytes": os.path.getsize(path),
+                     **({"wal_sha1": bench.file_sha1(path + "-wal"), "wal_bytes": os.path.getsize(path + "-wal")}
+                        if os.path.exists(path + "-wal") and os.path.getsize(path + "-wal") else {})},
+        "catalogue": {"windows": len(catalogue), "files": len(glob.glob(os.path.join(args.catalogue, "*.json.gz"))),
+                      "sha1": bench.catalogue_sha1(args.catalogue)},
+        "leaderboards": {"events": events}, "replays": found["replays"], "live_pages": found["live_pages"],
+        "bands": found["bands"], "pace": found["pace"], "blend": found["blend"],
+        "model_key": found["model_key"], "ranks": list(bench.RANKS),
+        "points": [{"label": p, "share": s, "after_close": a} for p, s, a in POINTS],
+        # Two runs compare only under the same arrival, and the same cadence.
+        "arrival": arrival if not old else f"{arrival}, old cadence",
+        "rule": f"readings that reached the page by the point ({told}: "
+                f"{ARRIVAL_RULES.get(arrival) or ARRIVAL_RULES['minutes'] % arrival}); "
+                f"none called final before the close; none stamped more than {EARLY_MINUTES} min "
+                f"before the opening",
+        "arrival_model": {
+            "before": {"full_pass_minutes": FULL_PASS_MINUTES, "quick_pass_minutes": QUICK_PASS_MINUTES,
+                       "endgame_before": ENDGAME_BEFORE, "first_page": FIRST_PAGE},
+            "change_utc": FEED_CHANGE.strftime("%Y-%m-%d %H:%M"),
+            "since": {"full_pass_minutes": NEW_FULL_PASS_MINUTES, "looks": list(LOOK_MINUTES),
+                      "endgame_before": ENDGAME_BEFORE, "endgame_after": ENDGAME_AFTER,
+                      "looks_read": "the first page and the cuts' pages"},
+            "old_cadence": old, "lands_after": LANDS_AFTER} if arrival == "feed" else None,
+        "outages": {"paris": [list(p) for p in FEED_OUTAGES], "after_close_minutes": OUTAGE_AFTER,
+                    "left_out": not outages,
+                    "cups": len({line["window"] for line in found["lines"] if line.get("outage")}),
+                    "forecasts": sum(1 for r in rows if r.get("outage"))},
+        "loads": "rebuilt from the database, one per stamp rather than one per pass of the feed: each part of "
+                 "a pass carries the pass's pages, count and final mark",
+        "ranks_priced": "every rank the feed read in any of the cup's readings, later ones included, with the "
+                        "bench's ranks and the cut: chosen after the fact, but no later number reaches a point",
+        "early": early,
+        "small_result": SMALL_RESULT,
+        "cups": found["cups"], "replayed": len(found["lines"]), "models": found["models"],
+        "skipped": dict(found["skipped"]), "refused": dict(found["refused"]),
+        "flags": {"meaning": FLAGS, "found": flagged},
+        "tables": found_tables, "lines": found["lines"],
+    }
 
 
 if __name__ == "__main__":

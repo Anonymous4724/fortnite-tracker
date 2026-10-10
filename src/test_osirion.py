@@ -1851,15 +1851,15 @@ def main() -> int:
               (not_compared[0], len(not_compared[1]), "not set against each other" in not_compared[2],
                "--unchecked pages compares them" in not_compared[2]))
         refusals = []
-        for extra in (["--live", "--cutoff", "published"], ["--live", "--jobs", "2"],
-                      ["--live", "--variant", identity], ["--cold", "--arrival", "stamp"]):
+        for extra in (["--live", "--cutoff", "published"], ["--live", "--jobs", "2"], ["--cold", "--arrival", "stamp"],
+                      ["--cold", "--old-cadence"], ["--cold", "--skip-outages"]):
             printed = io.StringIO()
             with contextlib.redirect_stdout(printed):
                 code = bench.main([*extra, "--db", bench_db, "--catalogue", os.path.join(workdir, "no-catalogue"),
                                    "--cache", "none", "--since", "2026-07-06", "--until", "2026-07-21"])
             refusals.append((code, "Nothing measured" in printed.getvalue()))
-        check("the live bench refuses the cold bench's --cutoff published, --jobs and --variant, and the cold bench "
-              "--arrival, rather than drop them", [(2, True)] * 4, refusals)
+        check("the live bench refuses the cold bench's --cutoff published and --jobs, and the cold bench the live "
+              "one's --arrival, --old-cadence and --skip-outages, rather than drop them", [(2, True)] * 5, refusals)
 
     print("\n20. Two runs of the bench, forecast against forecast")
     import importlib.util
@@ -1950,21 +1950,18 @@ def main() -> int:
                         forecasts=[dict(p, point=point) for p in run["pairs"] for point in ("20 %", "50 %")])
 
         live = {}
-        for name, runs in (("both live", (live_run(base_run), live_run(base_run))),
-                           ("the variant live", (base_run, live_run(base_run))),
+        for name, runs in (("the variant live", (base_run, live_run(base_run))),
+                           ("the base live", (live_run(base_run), base_run)),
                            ("forecasts and no pairs", (base_run, {k: v for k, v in live_run(base_run).items()
                                                                   if k != "bench"}))):
             try:
                 live[name] = judged(*runs)
             except ValueError as error:
                 live[name] = str(error)
-        try:
-            live["the strawman of a live run"] = str(bench_compare.strawman(live_run(base_run), {}))[:80]
-        except ValueError as error:
-            live["the strawman of a live run"] = str(error)
-        check("live runs are not paired yet: refused, whichever side, with what they are",
-              {name: True for name in live},
-              {name: told.startswith("live runs are not paired yet") for name, told in live.items()})
+        both = bench_compare.compare(live_run(base_run), live_run(base_run), draws=0)
+        check("two live runs are compared point by point; a live run against a cold one is refused, either side",
+              ({name: True for name in live}, {"20 %": "no change", "50 %": "no change"}),
+              ({name: "comes from the live bench" in told for name, told in live.items()}, both["verdicts"]))
 
         # Each pair aims at one result: a variant that moved a result, or a
         # cup's id, day, region or cut, would be judged against another truth.
@@ -2039,7 +2036,8 @@ def main() -> int:
         over = bench_run([dict(p, forecast=p["result"] * 1.3) for p in cups])
         under = bench_compare.compare(over, moved(over, lambda p: p["result"] * 0.73))
         check("an error that shrinks but grows in log is no gain, failed on the log and on the halves",
-              ("no gain", ["mean log error down", "mean, median |error| and log error down in both halves"], True),
+              ("no gain", ["mean log error down", "in both halves: mean |error| and log error down, median not up"],
+               True),
               (under["verdict"], under["failed"], under["interval"]["abs_mean"][1] < 0))
         # Better in the first half of the span, worse in the second.
         halves = bench_compare.compare(base_run, moved(base_run, lambda p: (p["result"] + p["forecast"]) / 2
@@ -2076,7 +2074,7 @@ def main() -> int:
         better = bench_compare.compare(base_run, moved(base_run, lambda p: better_but_oceania(dict(p, region="EU"))))
         one_region = bench_compare.compare(base_run, moved(base_run, better_but_oceania))
         check("a gain passes the rule; the same gain with one region a point worse fails on that region alone",
-              ("gain", "no gain", ["no region worse by more than 0.5 point"], "OCE +1.00"),
+              ("gain", "no gain", ["no region (30+ forecasts, 20+ cups) worse by more than 0.5 point"], "OCE +1.00"),
               (better["verdict"], one_region["verdict"], one_region["failed"],
                next(c["detail"] for c in one_region["conditions"] if c["rule"].startswith("no region"))))
         # Forecasts 25 % over results of 64 points, then 26 % over on half of
@@ -2209,7 +2207,7 @@ def main() -> int:
                  "no cup in the days asked": [gap, base_file, "--since", "2026-07-10", "--until", "2026-07-11"],
                  "not one forecast in common": [base_file, written("elsewhere.json", bench_run(
                      [dict(p, window="Elsewhere" + p["window"]) for p in cups]))],
-                 "two live runs": [written("live.json", live_run(base_run))] * 2}
+                 "a live run and a cold one": [written("live.json", live_run(base_run)), base_file]}
         empties = {name: command(argv) for name, argv in empty.items()}
         last_day = command([base_file, base_file, "--since", "2026-07-28"])
         check("nothing to pair is not compared: said plainly, a code of 2 and no verdict; an empty half is not printed",
@@ -2217,7 +2215,10 @@ def main() -> int:
               ({name: (code, out.startswith("Cannot compare:"), "verdict" in out)
                 for name, (code, out) in empties.items()},
                last_day[0], "2026-07-28 to 2026-07-27" in last_day[1], "2026-07-28 to 2026-07-28" in last_day[1]))
-        check("and live runs are said to be live", True, "live runs are not paired yet" in empties["two live runs"][1])
+        two_live = command([os.path.join(folder, "live.json")] * 2)
+        check("and live runs are said to be live; two of them are compared, point by point", (True, 0, True),
+              ("comes from the live bench" in empties["a live run and a cold one"][1], two_live[0],
+               "verdicts: 20 % NO CHANGE, 50 % NO CHANGE" in two_live[1]))
         said = {"a day badly written": (codes["a day badly written"][1], "not a day written YYYY-MM-DD: '2026-7-9'"),
                 "a day in another ISO form": (codes["a day in another ISO form"][1],
                                               "not a day written YYYY-MM-DD: '20260709'"),
@@ -2348,6 +2349,12 @@ def main() -> int:
               ["2026-09-24T12:00", "2026-09-24T16:19", "2026-09-24T18:10"],
               [m.get("at") for m in history.models] if history else None)
 
+    print("\n22. The measuring tools: exact numbers, the gain rule, the live bench compared")
+    if any(importlib.util.find_spec(p) is None for p in ("numpy", "pandas", "scipy")):
+        print("   (skipped: analysis/ needs its own requirements, see analysis/requirements.txt)")
+    else:
+        measuring_tools(workdir, replay_db, pages, live_db)
+
     print("\n" + "=" * 68)
     if FAILURES:
         print(f"  {len(FAILURES)} failure(s):")
@@ -2358,6 +2365,570 @@ def main() -> int:
     print("  The Osirion reader agrees with payloads whose answers are known.")
     print("=" * 68 + "\n")
     return 0
+
+
+def measuring_tools(workdir: str, replay_db: str, pages: str, live_db: str) -> None:
+    """The bench's own tools: a variant run the way the bench is run, the gain
+    rule, the numbers the page shows, and the live bench's comparison."""
+    import contextlib
+    import sqlite3
+    import subprocess
+    from analysis import bench
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    here = os.path.join(workdir, "tools")
+    os.makedirs(here, exist_ok=True)
+    no_catalogue = os.path.join(workdir, "no-catalogue")
+
+    def write(name, body):
+        path = os.path.join(here, name)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(body)
+        return path
+
+    def loaded(path):
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh)
+
+    # A variant that replaces one of the bench's own functions marks every
+    # forecast it prices: run as `python -m analysis.bench`, in one process
+    # and in two, its run is marked and today's is not.
+    hook = write("hook.py", (
+        "CHANGES_MODEL = False\n\n\n"
+        "def apply():\n"
+        "    from analysis import bench\n"
+        "    plain = bench.price\n\n"
+        "    def marked(*args, **kwargs):\n"
+        "        return [dict(p, hooked=True) for p in plain(*args, **kwargs)]\n\n"
+        "    bench.price = marked\n"
+        "    return None\n"))
+    marks = {}
+    for jobs in (1, 2):
+        out = os.path.join(here, f"hooked-{jobs}.json")
+        done = subprocess.run([sys.executable, "-m", "analysis.bench", "--cold", "--since", "2026-07-13", "--until",
+                               "2026-07-21", "--db", replay_db, "--catalogue", no_catalogue,
+                               "--cache", os.path.join(here, "cache"), "--leaderboards", pages, "--json", out,
+                               "--variant", hook, "--jobs", str(jobs)],
+                              cwd=root, capture_output=True, text=True, encoding="utf-8", errors="replace")
+        found = [loaded(p) for p in (out, bench.variant_json(out)) if os.path.exists(p)]
+        marks[jobs] = (done.returncode, len(found),
+                       tuple(sorted({bool(p.get("hooked")) for p in run["pairs"]}) for run in found))
+    check("under python -m, a variant replacing a function of analysis.bench reaches the run, in 1 and 2 processes",
+          {1: (0, 2, ([False], [True])), 2: (0, 2, ([False], [True]))}, marks)
+    # In this process, the bench's functions are put back after the variant's
+    # run, though the variant left nothing to put them back with.
+    plain_price = bench.price
+    with contextlib.redirect_stdout(io.StringIO()):
+        bench.main(["--cold", "--since", "2026-07-13", "--until", "2026-07-21", "--db", replay_db, "--catalogue",
+                    no_catalogue, "--cache", os.path.join(here, "cache"), "--leaderboards", pages,
+                    "--json", os.path.join(here, "in-process.json"), "--variant", hook])
+    check("the bench's own functions a variant replaced are put back after its run", True,
+          bench.price is plain_price)
+    # A model built again on another day is the same model.
+    dated = bench.Variant(write("dated.py", (
+        "import export_model\n\nCHANGES_MODEL = False\n\n\n"
+        "def apply():\n"
+        "    plain = export_model.build_model\n"
+        "    export_model.build_model = lambda *a, **k: dict(plain(*a, **k), generated='2000-01-01')\n"
+        "    return lambda: setattr(export_model, 'build_model', plain)\n")))
+    marked = bench.Variant(write("marked.py", (
+        "import export_model\n\nCHANGES_MODEL = False\n\n\n"
+        "def apply():\n"
+        "    plain = export_model.build_model\n"
+        "    export_model.build_model = lambda *a, **k: dict(plain(*a, **k), marked=True)\n"
+        "    return lambda: setattr(export_model, 'build_model', plain)\n")))
+    # A field the model already has, moved: its measured quality, its curve.
+    requality = bench.Variant(write("requality.py", (
+        "import export_model\n\nCHANGES_MODEL = False\n\n\n"
+        "def apply():\n"
+        "    plain = export_model.build_model\n"
+        "    moved = lambda m: dict(m, quality=dict(m['quality'], coverage=0.5))\n"
+        "    export_model.build_model = lambda *a, **k: moved(plain(*a, **k))\n"
+        "    return lambda: setattr(export_model, 'build_model', plain)\n")))
+    recurve = bench.Variant(write("recurve.py", (
+        "import export_model\n\nCHANGES_MODEL = False\n\n\n"
+        "def apply():\n"
+        "    plain = export_model.build_model\n"
+        "    moved = lambda m: dict(m, curve=dict(m['curve'], b=m['curve']['b'] + 0.01))\n"
+        "    export_model.build_model = lambda *a, **k: moved(plain(*a, **k))\n"
+        "    return lambda: setattr(export_model, 'build_model', plain)\n")))
+    key = bench.model_key(replay_db)
+    conn = bench.open_read_only(replay_db, live=False)
+    conn.row_factory = sqlite3.Row
+    try:
+        cutoff = bench.cutoff_of("2026-07-20 18:00:00")
+        same = [bench.same_model(conn, cutoff, None, key, v) for v in (dated, marked, requality, recurve)]
+    finally:
+        conn.close()
+    check("a model built on another day is the same model; one with anything else changed is not: a field added,"
+          " its quality or its curve moved", [True, False, False, False], same)
+
+    # The benches measure the page's numbers, not the export's tenth.
+    import export_model
+    import rescore
+    from collections import Counter
+    from analysis import bench_compare, bench_live, coldbench
+    conn = bench.open_read_only(replay_db, live=False)
+    conn.row_factory = sqlite3.Row
+    kept_raw, rescore.RAW = rescore.RAW, pages
+    try:
+        comps = export_model.load_competitions(conn)
+        model = bench.Models(conn, comps, key, None).get(cutoff)
+        target = next(c for c in comps if (c.get("family"), c.get("region")) == ("Replay Cup", "ME"))
+        row = bench.database_row(target)
+        row["cold"] = bench.cold_cell(conn, row, cutoff)
+        t = bench.tournament_of(model, row)[0]
+        priced = {p["rank"]: p for p in bench.price(conn, model, target, {}, cutoff, bench.season_starts(conn),
+                                                     Counter(), Counter())}
+        forms = {}
+        for name in (("Replay Cup", "EU"), ("Board Late", "ME")):
+            other = bench.database_row(next(c for c in comps if (c.get("family"), c.get("region")) == name))
+            other["cold"] = bench.cold_cell(conn, other, cutoff)
+            forms[name] = bench.tournament_of(model, other)[0]
+    finally:
+        rescore.RAW = kept_raw
+        conn.close()
+    ranks = sorted(priced)
+    plain = [export_model.predict_from_model(model, dict(t, rank=r)) for r in ranks]
+    exact = [export_model.predict_from_model(model, dict(t, rank=r, unrounded=True)) for r in ranks]
+    check("predict_from_model rounds to the tenth unless asked; unrounded, it carries the model's rel",
+          (True, True, True, True),
+          (all(p["value"] == round(e["value"], 1) and p["high"] == round(e["high"], 1) for p, e in zip(plain, exact)),
+           all("rel" not in p for p in plain),
+           all(abs(e["high"] - e["value"] * (1 + e["rel"])) < 1e-9 * e["high"] for e in exact),
+           any(e["value"] != round(e["value"], 1) for e in exact)))
+    # The same on each of the four ways to a forecast: the last edition, a
+    # single lobby read off the finals of its mode (a table of them given to
+    # the model), recent boards replayed under the cup's table, the cascade.
+    board = forms[("Board Late", "ME")]
+    lobby_model = dict(model, lobby=[{"game_mode": "*", "team_mode": "",
+                                      "rows": [[0.05, 0.6, 0.2, 9], [0.5, 0.2, 0.25, 9]]}])
+    ways = []
+    for m, form in ((model, dict(forms[("Replay Cup", "EU")], rank=10)),
+                    (lobby_model, dict(board, field_size=50, rank=5)),
+                    (model, dict(board, field_size=2000, rank=10,
+                                 cold={"ranks": [[1, 600.0], [100, 300.0]], "rel": 0.12, "donors": 4})),
+                    (model, dict(t, rank=10))):
+        p, e = export_model.predict_from_model(m, form), export_model.predict_from_model(m, dict(form, unrounded=True))
+        ways.append((p["source"], all(p[k] == round(e[k], 1) for k in ("value", "low", "high")) and "rel" not in p,
+                     abs(e["high"] - e["value"] * (1 + e["rel"])) < 1e-9 * e["high"]
+                     and abs(e["low"] - e["value"] * (1 - e["rel"])) < 1e-9 * e["high"]
+                     and e["high"] != round(e["high"], 1)))
+    check("unrounded on each way to a forecast: the last edition, a single lobby, boards replayed, the cascade",
+          [("previous edition", True, True), ("closed lobby", True, True), ("re-scored boards", True, True),
+           ("family + re-scored boards", True, True)], ways)
+    evening = bench_live.Evening(model, t, datetime(2026, 7, 20, 18), datetime(2026, 7, 20, 21), False)
+    check("the cold bench and the live bench's cold answer price the page's numbers, with the model's rel",
+          (True, True, True),
+          (bool(ranks), all(priced[r]["forecast"] == e["value"] and priced[r]["rel"] == e["rel"]
+                            for r, e in zip(ranks, exact)),
+           all(evening.cold(r)["value"] == e["value"] and evening.cold(r)["rel"] == e["rel"]
+               for r, e in zip(ranks, exact))))
+    # A range of 10.4 x e^(+-0.05) is 9.89 to 10.93 as computed, 10 to 11 as
+    # the page prints it; an end of 10.5 is printed 11 (Math.round), not 10.
+    pair = {"forecast": 10.4, "rel": 0.1, "result": 11.0, "bands": {"50": [-0.5, 0.5]}}
+    check("a range holds a result on its ends as the page prints them, rounded half up",
+          (False, True, True, True, True, False),
+          (coldbench.inside(pair, "50"), coldbench.inside(pair, "50", shown=True),
+           bench_compare.covered(pair, "50"), bench_live.holds([9.893, 10.5], 11.0),
+           bench_compare.covered({"result": 11.0, "near": [9.893, 10.5], "wide": [9.0, 12.0]}, "50"),
+           bench_live.holds([9.893, 10.49], 11.0)))
+
+    # The gain rule, on runs whose answers are known by construction.
+    import copy
+    from analysis import bench_compare
+    rule = bench_compare
+
+    def forecast(n, window, family, day, region, rank, result, forecast, season=None):
+        return {"window": window, "id": n, "family": family, "day": day, "local_day": day,
+                "model": f"{day} 16:00:00", "region": region, "rank": rank, "at_cut": False, "result": result,
+                "forecast": forecast, "rel": 0.2, "bands": {"50": [-0.5, 0.5], "90": [-1.5, 1.5]},
+                "source": "family", "season": season}
+
+    def run_of(pairs, since="2026-07-01", until="2026-07-29"):
+        return {"bench": "cold", "since": since, "until": until, "cutoff": "update", "update": None,
+                "database": {"sha1": "d" * 40}, "catalogue": {"sha1": "c" * 40}, "leaderboards": {"events": 0},
+                "replays": {"boards": []}, "ranks": [10, 25, 100, 250, 500, 1000], "bands": {"generated": "x"},
+                "pairs": pairs}
+
+    def scaled(pairs, by):
+        """The pairs, each forecast times by(pair) (None: left out)."""
+        out = []
+        for p in pairs:
+            factor = by(p)
+            if factor is not None:
+                out.append(dict(p, forecast=p["forecast"] * factor))
+        return out
+
+    # One event played in six regions on one evening and again a week later,
+    # both times better, beside two cups of another family left alone: by the
+    # cups the change is sure, by family x local day (four draws) it is not.
+    pairs, n = [], 0
+    for day, other in (("2026-07-05", "2026-07-06"), ("2026-07-19", "2026-07-20")):
+        for region in ("EU", "NAC", "NAW", "BR", "ME", "OCE"):
+            n += 1
+            pairs += [forecast(n, f"F|{day}|{region}", "F", day, region, rank, 100.0, 110.0)
+                      for rank in (10, 100, 1000)]
+        n += 1
+        pairs += [forecast(n, f"G|{other}", "G", other, "ASIA", rank, 100.0, 110.0) for rank in (10, 100, 1000)]
+    better = scaled(pairs, lambda p: 105 / 110 if p["family"] == "F" else 1.0)
+    found = rule.compare(run_of(pairs), run_of(better))
+    by_cup = found["intervals"].get("cup", {}).get("abs_mean") or [0, 0]
+    check("the interval that judges draws family x local day: one event in six regions is one draw",
+          ("family x local day", True, False, "no gain"),
+          (found["interval"]["unit"], by_cup[1] < 0, found["interval"]["abs_mean"][1] < 0, found["verdict"]))
+
+    def next_day(rows, region, field):
+        """The rows, those of the event in `region` with `field` moved to the next day."""
+        return [dict(p, **{field: (datetime.fromisoformat(p[field]) + timedelta(days=1)).date().isoformat()})
+                if (p["family"], p["region"]) == ("F", region) else p for p in rows]
+
+    # The draws follow the local day, not the UTC one: the event's NAW cup
+    # played past midnight UTC is still its evening's draw; an OCE cup whose
+    # local day is the next one is a draw of its own.
+    late_naw = rule.compare(run_of(next_day(pairs, "NAW", "day")), run_of(next_day(better, "NAW", "day")))
+    oce_rows = next_day(pairs, "OCE", "local_day")
+    next_oce = rule.compare(run_of(oce_rows), run_of(next_day(better, "OCE", "local_day")))
+    check("the draws are family x local day: a NAW cup past midnight UTC stays in its evening's draw, an OCE cup"
+          " on the next local day is another", (True, False, ("F", "2026-07-06")),
+          (late_naw["interval"]["abs_mean"] == found["interval"]["abs_mean"],
+           next_oce["interval"]["abs_mean"] == found["interval"]["abs_mean"],
+           rule.family_day(next(p for p in oce_rows if p["region"] == "OCE"))))
+
+    # Forty cups whose largest error alone is halved: the median stays where
+    # it was (to 1e-9: the forecasts at the middle moved by 1e-13), the rest
+    # goes down.
+    pairs, n = [], 0
+    for k in range(40):
+        day = f"2026-07-{1 + k % 28:02d}"
+        region = ("EU", "NAC", "BR", "ASIA")[k % 4]
+        n += 1
+        for rank, off in ((10, 2), (25, 3), (100, 4), (250, 5), (500, 6), (1000, 40)):
+            pairs.append(forecast(n, f"T{k}|{day}", f"T{k}", day, region, rank, 200.0, 200.0 * (1 + off / 100)))
+    tail = scaled(pairs, lambda p: (120 / 140) if p["rank"] == 1000 else (1 + 1e-13) if p["rank"] in (100, 250)
+                  else 1.0)
+    found = rule.compare(run_of(pairs), run_of(tail))
+    median_change = found["overall"]["all"]["change"]["abs_median"]
+    check("a change that leaves the median where it was, to 1e-9, and lowers the rest is a gain",
+          (True, True, "gain"), (0 < median_change < 1e-9, found["interval"]["abs_mean"][1] < 0, found["verdict"]))
+    segments = [rule.compare(run_of(pairs), run_of(tail), segment=s)["verdict"]
+                for s in ("p['rank'] == 1000", "p['rank'] <= 250")]
+    check("a declared segment must see its own median go down", ["gain", "no gain"], segments)
+    try:
+        rule.compare(run_of(pairs), run_of(tail), segment="p['nothing']")
+        told = "no error"
+    except ValueError as exc:
+        told = "fails on" in str(exc)
+    check("a segment that does not read on the forecasts is refused, not judged", True, told)
+    # The regions and the halves, read off the same result.
+    judged = copy.deepcopy(found)
+    region = judged["tables"]["region"]["EU"]
+    regions = []
+    for pairs_, cups_, change in ((29, 25, 2.0), (30, 19, 2.0), (30, 20, 0.5), (30, 20, 0.51)):
+        region.update(pairs=pairs_, cups=cups_)
+        region["change"]["abs_mean"] = change
+        regions.append(rule.judge(judged, [])[1])
+    check("a region is judged with 30 forecasts and 20 cups, and may lose 0.5 point exactly",
+          ["gain", "gain", "gain", "no gain"], regions)
+    judged = copy.deepcopy(found)
+    halves = []
+    for median in (0.0, 1e-12, 0.01):
+        judged["halves"][0]["change"]["abs_median"] = median
+        halves.append(rule.judge(judged, [])[1])
+    check("in each half the median may stay where it was, to 1e-9, but not go up", ["gain", "gain", "no gain"],
+          halves)
+
+    # A refusal judged apart: the variant drops the largest errors of the
+    # base (under 5 % of its forecasts) and leaves the rest alone.
+    pairs, n = [], 0
+    for k in range(40):
+        day = f"2026-07-{1 + k % 28:02d}"
+        n += 1
+        for rank, off in ((10, 2), (25, 3), (100, 4), (250, 5), (500, 6), (1000, 7)):
+            off = 60 if (k % 5 == 0 and rank >= 500) else off
+            pairs.append(forecast(n, f"R{k}|{day}", f"R{k}", day, "EU", rank, 200.0, 200.0 * (1 + off / 100),
+                                  season=41 + k % 2))
+    # The largest errors at the deepest rank (3.3 %), or at the two deepest (6.7 %: too many).
+    dropped = [p for p in pairs if not (p["rank"] == 1000 and p["forecast"] > 300)]
+    wide = [p for p in pairs if not p["forecast"] > 300]
+    plain = [p for p in pairs if not (p["rank"] == 10 and int(p["window"][1:].split("|")[0]) % 10 == 0)]
+    refusals = (rule.compare(run_of(pairs), run_of(dropped))["verdict"],
+                rule.compare(run_of(pairs), run_of(dropped), refusal=True)["verdict"],
+                rule.compare(run_of(pairs), run_of(wide), refusal=True)["verdict"],
+                rule.compare(run_of(pairs), run_of(plain), refusal=True)["verdict"],
+                rule.compare(run_of(pairs), run_of(scaled(dropped, lambda p: 1.01)), refusal=True)["verdict"])
+    check("a refusal is judged apart: under 5 %, twice the others' median, the rest unchanged",
+          ("no gain", "gain", "no gain", "no gain", "no gain"), refusals)
+    # Twice the others' median in one half only is not enough: the variant
+    # refuses the largest errors of the first half and, in the second, the
+    # same cups' smallest.
+    first_half = "2026-07-15"
+    one_half = [p for p in pairs if not (int(p["window"][1:].split("|")[0]) % 5 == 0 and (
+        p["rank"] == 1000 if p["day"] < first_half else p["rank"] == 10))]
+    one_found = rule.compare(run_of(pairs), run_of(one_half), refusal=True)
+    check("a refusal that holds twice the others' median in one half only is no gain",
+          ("no gain", [True, False], 1),
+          (one_found["verdict"], [h["holds"] for h in one_found["refusal"]["halves"]], len(one_found["failed"])))
+
+    # The live bench writes, for each answer, the local day, rel and the floor.
+    conn = bench.open_read_only(live_db, live=False)
+    conn.row_factory = sqlite3.Row
+    live_key = bench.model_key(live_db)
+    try:
+        measured = bench_live.measure(conn, "2026-07-20", "2026-07-21", {}, None, live_key, progress=False)
+        comps = export_model.load_competitions(conn)
+        cup = next(c for c in comps if c.get("family") == "Live Cup" and str(c.get("start_time")).startswith(
+            "2026-07-20 18"))
+        live_cutoff = bench.cutoff_of(str(cup["start_time"]))
+        live_model = bench.Models(conn, comps, live_key, None).get(live_cutoff)
+        cup_t = bench.tournament_of(live_model, bench.database_row(cup))[0]
+        cup_snaps = bench_live.snapshots_of(conn, cup["id"], datetime(2026, 7, 20, 18), datetime(2026, 7, 20, 21))
+        far_rows = bench_live.price_cup(conn, live_model, dict(cup, region="OCE"), {}, live_cutoff, Counter(),
+                                        Counter())[0]
+        named_rows = bench_live.price_cup(conn, live_model, dict(cup, event_id="epicgames_S42_LiveCup_EU",
+                                                                 window_id="S42_LiveCup_Event1_EU"), {},
+                                          live_cutoff, Counter(), Counter())[0]
+    finally:
+        conn.close()
+    rows = measured["rows"]
+    check("each live answer carries its local day, its rel and its floor, and never says less than the floor",
+          (True, True, True, True),
+          (bool(rows) and all(r["local_day"] == bench.local_day(f"{r['day']} 18:00:00", r["region"]) for r in rows)
+           and bool(far_rows) and {r["local_day"] for r in far_rows} == {"2026-07-21"},
+           all(isinstance(r["rel"], float) and r["rel"] >= 0 for r in rows),
+           all(isinstance(r["floor"], (int, float)) for r in rows),
+           all(r["forecast"] >= r["floor"] - 1e-9 for r in rows) and any(r["floor"] > 0 for r in rows)))
+    check("each live answer carries its season, as the cold bench reads it (the database's, else the event's)",
+          (True, {42}), (all("season" in r for r in rows), {r.get("season") for r in named_rows}))
+    # An empty curve or tail of the cup's family reads the share as it
+    # is, as the page does, not the pooled curve.
+    empty_model = copy.deepcopy(live_model)
+    empty_model["pace"]["families"] = [["Battle Royale", "Solo", 180, 10, {}, {}, None, 30,
+                                        *bench_live.page_signature(cup_t)]] + list(
+        empty_model["pace"].get("families") or [])
+    empty_model["pace"]["categories"] = []
+    found_pace = bench_live.family_pace(empty_model["pace"], cup_t, 180, datetime(2026, 7, 20, 18))
+    evening = bench_live.Evening(empty_model, cup_t, datetime(2026, 7, 20, 18), datetime(2026, 7, 20, 21), False)
+    evening.replay(bench_live.records_of(bench_live.available(cup_snaps, 120, 180)))
+    page_side = evening.refine(mirror=False)
+    by_name = bench_live.family_pace({"categories": [[bench_live.live.category_key(cup_t.get("name")), {}, {}, 30, "",
+                                                      "feed"]], "families": []}, cup_t, 180, datetime(2026, 7, 20, 18))
+    check("an empty family curve or tail is the page's raw share, not the pooled curve; flagged 'empty'",
+          ({}, {}, {}, True, True),
+          ((found_pace or {}).get("curve"), (found_pace or {}).get("tail"), (by_name or {}).get("curve"),
+           bool(page_side) and page_side["expected_for"](10) == page_side["share"],
+           "empty" in bench_live.cup_flags(evening, evening.refine(mirror=True))))
+
+    # The feed's two regimes: until 4 October 2026, 16:45 UTC, the full pass
+    # every ten minutes and the first page every five in the last twenty;
+    # since, the full pass every five minutes and, twenty minutes either side
+    # of the close, looks at the first page and the cuts' pages one, two and
+    # three minutes past each mark.
+    opens, closes = datetime(2026, 10, 5, 18), datetime(2026, 10, 5, 21)
+
+    def lands(minute, ranks, cuts=(), old=False, begin=opens, end=closes):
+        return round(bench_live.landed(begin, end, minute, ranks, "feed", cuts, old), 6)
+
+    check("since the change: a full pass every 5 min, looks at minutes 1-3 near the close, first and cuts' pages",
+          [37.0, 169.0, 172.0, 169.0, 197.0, 198.0, 202.0],
+          [lands(31, (10, 100)), lands(167, (1, 10, 100)), lands(167, (10, 1000), (100,)),
+           lands(167, (10, 1000), (1000,)), lands(195, (10,)), lands(196, (10,)), lands(199, (10,))])
+    check("near the close, a reading stamped between two and three minutes past a mark lands on the look at three",
+          [200.0, 180.0], [lands(197.5, (10,)), lands(177.4, (10, 1000), (1000,))])
+    check("before it, and with --old-cadence: the full pass every 10 min, the first page every 5 near the close",
+          [42.0, 172.0, 172.0, 42.0, 52.0, 47.0],
+          [lands(31, (10, 100), old=True), lands(167, (1, 10, 100), old=True), lands(167, (10, 1000), (1000,), True),
+           lands(31, (10, 100), begin=datetime(2026, 9, 20, 18), end=datetime(2026, 9, 20, 21)),
+           lands(43, (10,), begin=datetime(2026, 10, 4, 16), end=datetime(2026, 10, 4, 19)),
+           lands(45, (10,), begin=datetime(2026, 10, 4, 16), end=datetime(2026, 10, 4, 19))])
+    check("the regime is the one the feed ran at the reading's stamp",
+          ["before", "since", "before"],
+          [bench_live.regime_of(datetime(2026, 10, 4, 16), 44), bench_live.regime_of(datetime(2026, 10, 4, 16), 45),
+           bench_live.regime_of(datetime(2026, 10, 4, 16), 45, old=True)])
+    # Brought back to the old cadence: of the readings one old pass would have
+    # taken, the latest only; the readings before the change all stay.
+    snaps = [{"minute": m, "known": lands(m, ranks, old=True), "points": {r: 1.0 for r in ranks}}
+             for m, ranks in ((31, (10, 1000)), (33, (10, 1000)), (36, (10,)), (161, (10,)), (163, (10,)),
+                              (166, (10,)))]
+    check("--old-cadence keeps, per pass of the old feed, the latest reading it could take",
+          [33, 36, 163, 166], [s["minute"] for s in bench_live.old_cadence(snaps, opens)])
+    # The same through the database: a cup read at minutes 12 and 13, after
+    # the change (moved back to July for the check), is read once at 13 then.
+    import db
+    import shutil
+    later_db = os.path.join(here, "later.db")
+    shutil.copy(live_db, later_db)
+    with db.session(later_db) as conn:
+        db.add_snapshot(conn, cup["id"], ts="2026-07-20 18:13", points={1: 30.0, 10: 20.0, 100: 10.0, 1000: 5.0},
+                        note="live feed", games=1)
+    kept_change, bench_live.FEED_CHANGE = bench_live.FEED_CHANGE, datetime(2026, 7, 1)
+    try:
+        conn = bench.open_read_only(later_db, live=False)
+        try:
+            read_as = {old: [(round(s["minute"]), round(s["known"])) for s in bench_live.snapshots_of(
+                conn, cup["id"], datetime(2026, 7, 20, 18), datetime(2026, 7, 20, 21), "feed", (), old)][:3]
+                for old in (False, True)}
+        finally:
+            conn.close()
+    finally:
+        bench_live.FEED_CHANGE = kept_change
+    check("read from the database, the readings since the change land on its passes, or on the old ones thinned",
+          {False: [(12, 17), (13, 17), (24, 27)], True: [(13, 22), (24, 32), (36, 42)]}, read_as)
+    check("the evenings the feed was down are told by the window and the twenty minutes past it (Paris time)",
+          [True, False, True, False],
+          [bench_live.outage_of(datetime(2026, 9, 19, 18), datetime(2026, 9, 19, 21)),
+           bench_live.outage_of(datetime(2026, 9, 19, 15), datetime(2026, 9, 19, 18, 9)),
+           bench_live.outage_of(datetime(2026, 10, 4, 12), datetime(2026, 10, 4, 13)),
+           bench_live.outage_of(datetime(2026, 10, 4, 14, 1), datetime(2026, 10, 4, 15))])
+    check("a window closed fifteen minutes before the feed went down is marked: its twenty minutes past ran in it",
+          True, bench_live.outage_of(datetime(2026, 9, 19, 15), datetime(2026, 9, 19, 18, 15)))
+    kept_outages = bench_live.FEED_OUTAGES
+    bench_live.FEED_OUTAGES = (("2026-07-20 19:00", "2026-07-20 21:00"),)
+    try:
+        conn = bench.open_read_only(live_db, live=False)
+        conn.row_factory = sqlite3.Row
+        try:
+            marked = bench_live.measure(conn, "2026-07-20", "2026-07-21", {}, None, live_key, progress=False)
+            left = bench_live.measure(conn, "2026-07-20", "2026-07-21", {}, None, live_key, progress=False,
+                                      outages=False)
+        finally:
+            conn.close()
+    finally:
+        bench_live.FEED_OUTAGES = kept_outages
+    check("a cup an outage touched is marked, and left out with --skip-outages",
+          (True, False, 0, 2),
+          (bool(marked["rows"]) and all(r["outage"] for r in marked["rows"]), any(r["outage"] for r in rows),
+           len(left["rows"]), left["skipped"].get("cups an outage of the feed touched (--skip-outages)")))
+
+    # Two live runs, point by point: the reference against itself, a variant
+    # two percent high from 80 % of the session on, a variant that loses
+    # forecasts, and runs of two arrivals.
+    def live_row(n, family, day, region, rank, point, result, forecast):
+        return {"window": f"{family}|{day}|{region}", "id": n, "family": family, "day": day, "local_day": day,
+                "model": f"{day} 16:00:00", "region": region, "rank": rank, "point": point, "minute": 1.0,
+                "at_cut": False, "result": result, "forecast": forecast, "near": [forecast * 0.9, forecast * 1.1],
+                "wide": [forecast * 0.8, forecast * 1.2], "rel": 0.1, "floor": 0, "depth": "0.02-0.05"}
+
+    labels = [p for p, _, _ in bench_live.POINTS]
+    live_rows, n = [], 0
+    for k in range(40):
+        day = f"2026-07-{1 + k % 28:02d}"
+        for region in ("EU", "NAC"):
+            n += 1
+            for point in labels:
+                for rank, off in ((10, 3), (100, 4), (1000, 6)):
+                    live_rows.append(live_row(n, f"L{k}", day, region, rank, point, 300.0, 300.0 * (1 + off / 100)))
+    reference = dict(run_of([]), bench="live", arrival="feed", forecasts=live_rows,
+                     points=[{"label": p} for p in labels], live_pages={"digest": "p"})
+    reference.pop("pairs")
+    late = {"80 %", "100 %", "+10 min", "+20 min"}
+    planted_rows = [dict(r, forecast=r["forecast"] * 1.02) if r["point"] in late else r for r in live_rows]
+    planted_run = dict(reference, forecasts=planted_rows)
+    itself = bench_compare.compare(reference, reference)
+    planted_found = bench_compare.compare(reference, planted_run)
+    lossy = bench_compare.compare(reference, dict(reference, forecasts=[r for r in live_rows if not (
+        r["point"] == "40 %" and r["rank"] == 1000 and r["id"] % 7 == 0)]))
+    other_arrival = []
+    for name, other in (("arrival", dict(reference, arrival="stamp")),
+                        ("live pages", dict(reference, live_pages={"digest": "q"})),
+                        ("outages", dict(reference, outages={"left_out": True}))):
+        try:
+            # Kept on one side and left out on the other is a value apart,
+            # never allowed unchecked.
+            bench_compare.compare(dict(reference, outages={"left_out": False}) if name == "outages" else reference,
+                                  other, unchecked=("outages",) if name == "outages" else ())
+            other_arrival.append("compared")
+        except bench_compare.SnapshotMismatch as exc:
+            other_arrival.append(f"{name}:" in str(exc))
+    check("live runs: the reference against itself changes nothing; +2 % from 80 % on is a loss there only",
+          ({p: "no change" for p in labels}, 0,
+           {p: ("loss" if p in late else "no change") for p in labels}),
+          (itself["verdicts"], itself["moved"], planted_found["verdicts"]))
+    # A forecast read at another minute of the session on the variant's side
+    # is not the same forecast: one at +10 min and one at +20 min moved.
+    moved_at = {next(i for i, r in enumerate(live_rows) if r["point"] == label): by
+                for label, by in (("+10 min", 10), ("+20 min", 20))}
+    try:
+        bench_compare.compare(reference, dict(reference, forecasts=[
+            dict(r, minute=r["minute"] + moved_at[i]) if i in moved_at else r for i, r in enumerate(live_rows)]))
+        aimed = "compared"
+    except bench_compare.SnapshotMismatch as exc:
+        aimed = str(exc)
+    check("live runs: two forecasts aimed at other minutes on one side are refused, the minute named",
+          True, f"2 of the {len(live_rows)} paired forecasts do not aim at the same thing on both sides (minute: 2)"
+          in aimed)
+    check("live runs: forecasts lost fail where they are lost; another arrival, other live pages or the outages"
+          " left out on one side only are another snapshot",
+          ("no gain", True, "no change", [True, True, True]),
+          (lossy["verdicts"]["40 %"], "every forecast of the base priced" in lossy["points"]["40 %"]["failed"],
+           lossy["verdicts"]["60 %"], other_arrival))
+    # The seasons judge at each point once the answers carry them; without,
+    # the report says they were not judged. A span asked from a month before
+    # the first cup priced has its halves cut on the days priced.
+    seasoned = dict(reference, forecasts=[dict(r, season=41 + int(r["family"][1:]) % 2) for r in live_rows])
+    seasoned_planted = dict(reference, forecasts=[dict(r, season=41 + int(r["family"][1:]) % 2)
+                                                   for r in planted_rows])
+    with_seasons = bench_compare.compare(seasoned, seasoned_planted)["points"]["80 %"]
+    early_span = bench_compare.compare(dict(reference, since="2026-06-01"), dict(planted_run, since="2026-06-01"))
+    printed = io.StringIO()
+    with contextlib.redirect_stdout(printed):
+        bench_compare.print_live_report(planted_found)
+    check("live seasons are judged when the answers carry them, and said not judged when they do not",
+          (True, True, True),
+          (any("most seasons" in c["rule"] for c in with_seasons["conditions"]),
+           "the seasons: the forecasts carry no season" in planted_found["points"]["80 %"]["not judged"],
+           "not judged at any point, for want of data: " in printed.getvalue()))
+    check("the live halves are cut on the days priced, not on a span asked from before the feed began",
+          ("2026-07-01", True, "2026-07-15"),
+          (early_span["points"]["80 %"]["halves"][0]["since"], early_span["points"]["80 %"]["halves"][0]["pairs"] > 0,
+           early_span["points"]["80 %"]["halves"][1]["since"]))
+    printed = io.StringIO()
+    with contextlib.redirect_stdout(printed):
+        bench_compare.print_report(found)
+    check("the printed rule keeps its detail apart, and says what it could not judge",
+          (True, True), ("(draws of family x local day) [" in printed.getvalue(),
+                         "not judged, for want of data: the regions" in printed.getvalue()))
+    # The live strawman, learned walk-forward by point x depth x region.
+    times = {r["id"]: {"start_time": f"{r['day']} 18:00:00", "end_time": f"{r['day']} 21:00:00"} for r in live_rows}
+    straw = bench_compare.strawman_live(reference, times)
+    first = {(r["id"], r["rank"], r["point"]): r for r in straw["forecasts"]}
+    day_two = [r for r in live_rows if r["day"] == "2026-07-02" and r["region"] == "EU" and r["point"] == "80 %"]
+    before = [r for r in live_rows if r["day"] < "2026-07-02" and r["region"] == "EU" and r["point"] == "80 %"]
+    errors = sorted(100 * (r["forecast"] / r["result"] - 1) for r in before)
+    middle = (errors[len(errors) // 2] if len(errors) % 2 else
+              (errors[len(errors) // 2 - 1] + errors[len(errors) // 2]) / 2)
+    expected = [r["forecast"] / (1 + middle * len(errors) / (len(errors) + 50) / 100) for r in day_two]
+    check("the live strawman divides by 1 + its group's past median, shrunk by n / (n + 50); the first day stays",
+          (True, True),
+          (all(abs(first[(r["id"], r["rank"], r["point"])]["forecast"] - e) < 1e-9 for r, e in zip(day_two, expected)),
+           all(first[(r["id"], r["rank"], r["point"])]["forecast"] == r["forecast"] for r in live_rows
+               if r["day"] == "2026-07-01")))
+
+    # bench --live --variant: the same cups replayed with a variant applied,
+    # written beside today's run and set against it point by point.
+    planted_live = write("planted_live.py", (
+        "CHANGES_MODEL = False\n\n\n"
+        "def apply():\n"
+        "    from analysis import bench_live\n"
+        "    plain = bench_live.price_cup\n\n"
+        "    def planted(*args, **kwargs):\n"
+        "        rows, line = plain(*args, **kwargs)\n"
+        "        late = [r for r in rows if r['after_close'] is not None or (r['share'] or 0) >= 0.8]\n"
+        "        for r in late:\n"
+        "            r.update(forecast=r['forecast'] * 1.02, near=[x * 1.02 for x in r['near'] or []] or None,\n"
+        "                     wide=[x * 1.02 for x in r['wide']])\n"
+        "        return rows, line\n\n"
+        "    bench_live.price_cup = planted\n"
+        "    return None\n"))
+    out, printed = os.path.join(here, "live.json"), io.StringIO()
+    with contextlib.redirect_stdout(printed):
+        code = bench.main(["--live", "--since", "2026-07-20", "--until", "2026-07-21", "--db", live_db, "--catalogue",
+                           no_catalogue, "--cache", "none", "--json", out, "--variant", planted_live])
+    pair = [loaded(p) for p in (out, bench.variant_json(out)) if os.path.exists(p)]
+    ratios = {(r["point"], round(v["forecast"] / r["forecast"], 9)) for r, v in zip(*[p["forecasts"] for p in pair])} \
+        if len(pair) == 2 else set()
+    check("bench --live --variant replays the cups with the variant, writes both runs and compares them per point",
+          (0, 2, {(p, 1.02 if p in late else 1.0) for p in labels}, True, bench_live.price_cup.__name__),
+          (code, len(pair), ratios, "verdicts: 20 % NO CHANGE" in printed.getvalue(), "price_cup"))
 
 
 if __name__ == "__main__":

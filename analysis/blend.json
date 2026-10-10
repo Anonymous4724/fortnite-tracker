@@ -1,26 +1,26 @@
 {
   "cold": {
     "family": [
-      0.2176,
-      256,
-      26
+      0.2222,
+      326,
+      33
     ],
     "previous edition": [
-      0.2051,
-      1763,
-      185
+      0.2096,
+      1867,
+      195
     ],
     "scoring": [
-      0.2439,
-      1294,
-      130
+      0.2297,
+      1439,
+      144
     ]
   },
-  "evenings": 359,
-  "generated": "2026-10-07",
+  "evenings": 390,
+  "generated": "2026-10-10",
   "note": "typical error over the width each side carries, on the evenings the feed followed: the page scales the history's width by cold / reading before blending",
   "reading": {
-    "rows": 68656,
-    "scale": 0.1908
+    "rows": 75678,
+    "scale": 0.1905
   }
 }
