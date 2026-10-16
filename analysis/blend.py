@@ -47,7 +47,30 @@ history by far more than both widths allow - the reading of a stale history.
 On both weeks it made the tail worse: a large disagreement early in a
 session is more often the readings' noise than the history's mistake.
 
-    python -m analysis.blend        rolling forecasts (a few minutes), then the scales
+Late in a session the scales still leave the history too much of the answer:
+on the feed's evenings of 5 to 29 September the forecast of a cup that ended
+more than a tenth away from its forecast before the cup had covered, in median, only
+0.55 of the way there at four fifths of the session, and 0.65 at the close.
+So from a share of SHARE_FROM of the session on, and past the close, the
+history's weight is multiplied by k, one k per tranche of the session (the
+share the readings stand at, or the minutes past the close): the k of
+SHARE_GRID with the least mean |log(answer / final)| over the blended answers
+of open queues on the cups that had ended, each answer as the page gave it,
+reading by reading (the live bench's replay, analysis/bench_live.py, each cup
+from the model of the last update before it). A tranche fewer than
+SHARE_MIN_CUPS cups have reached keeps k = 1, and so does the blend below
+SHARE_FROM. Learned that way cutoff by cutoff on the evenings of 4 September
+to 11 October, k settled at 0.1 from 0.7 of the session to the close and at 0
+to 0.05 past it. Replayed on the evenings of 1 to 11 October with the table
+of each cutoff (1,401 forecasts at each point), the mean |error| went from
+6.51 % to 5.56 % at four fifths of the session, from 4.36 % to 3.82 % at the
+close and from 3.97 % to 3.46 % ten minutes past it; nothing moved before four
+fifths. `by_share` in the model; the page reads a missing tranche as k = 1.
+When the cups cannot be replayed or learned from, the table of the last
+blend.json is kept as it was, and the run says so: a table lost is never k = 1.
+
+    python -m analysis.blend        rolling forecasts (a few minutes), the scales, then the
+                                    feed's cups replayed for the history's weight (minutes)
 
 Writes analysis/blend.json; export_model.py carries it into model.json.
 """
@@ -56,6 +79,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import sqlite3
 import statistics
 import sys
 from datetime import datetime, timezone
@@ -76,6 +100,109 @@ FROM_SHARE, TO_SHARE = 0.2, 1.0
 # had 82 forecasts from 8 cups - a scale of 0.5 that was eight evenings' luck.
 MIN_CUPS = 20
 MIN_ROWS = 30
+# The history's weight late in a session (see above): from this share of the
+# session on, and past the close, by tranche; k is one of SHARE_GRID, and a
+# tranche needs SHARE_MIN_CUPS cups before its k is believed.
+SHARE_FROM = 0.7
+SHARE_TRANCHES = ("0.7-0.9", "0.9-1", "after 0-10", "after 10+")
+SHARE_GRID = (0.0, 0.01, 0.02, 0.03, 0.05, 0.1, 0.15, 0.2, 0.3, 0.5, 0.7, 1.0, 1.5, 2.0)
+SHARE_MIN_CUPS = 30
+
+
+def share_tranche(share, after):
+    """The tranche of the session a live answer stands at (shareTranche on the
+    page): past the close by its minutes, else by the share of the session the
+    readings stand at; None below SHARE_FROM, where the blend is left as it is."""
+    if after and after > 0:
+        return "after 0-10" if after <= 10 else "after 10+"
+    if share is None or share < SHARE_FROM:
+        return None
+    return "0.7-0.9" if share < 0.9 else "0.9-1"
+
+
+def share_value(row: dict, k: float) -> float:
+    """A blended live answer with the history's weight multiplied by k: the
+    page's blend, (readings * wl + history * k * wc) / (wl + k * wc), written
+    with w = wl / (wl + wc), and never under the board's floor."""
+    w, fr, cold = row["readings_weight"], row["from_readings"], row["cold"]
+    return max((fr * w + cold * (1 - w) * k) / (w + (1 - w) * k), row["floor"] or 0)
+
+
+def learn_by_share(rows: list, ends: dict, cutoff: str, cups: dict | None = None) -> dict:
+    """{tranche: k}, from the live bench's answers `rows` (each with its cup's
+    `id`, `lobby`, `tranche`, `readings_weight`, `from_readings`, `cold`,
+    `floor` and `result`): per tranche, over the blended answers of open
+    queues on the cups that ended before `cutoff` (`ends`: cup id -> its end,
+    "YYYY-MM-DD HH:MM:SS" UTC), the k of SHARE_GRID with the least mean
+    |log(answer / final)|, a tie going to the k nearest 1. A tranche fewer than
+    SHARE_MIN_CUPS cups have reached is left out: k = 1 there. `cups`, when
+    given, gets the number of cups behind each tranche."""
+    by_tranche: dict = {}
+    for r in rows:
+        if r.get("readings_weight") is None or r.get("from_readings") is None or r.get("lobby") \
+                or r.get("tranche") not in SHARE_TRANCHES or not (ends.get(r["id"]) or "9999") < cutoff:
+            continue
+        by_tranche.setdefault(r["tranche"], []).append(r)
+    found = {}
+    for tranche in SHARE_TRANCHES:
+        got = by_tranche.get(tranche) or []
+        n = len({r["id"] for r in got})
+        if cups is not None:
+            cups[tranche] = n
+        if n < SHARE_MIN_CUPS:
+            continue
+        found[tranche] = min(SHARE_GRID, key=lambda k: (
+            sum(abs(math.log(share_value(r, k) / r["result"])) for r in got) / len(got), abs(math.log(k + 1e-9))))
+    return found
+
+
+def share_rows(path: str, until: str) -> tuple[list, dict]:
+    """(the live answers, {cup id: its end}) of the cups the feed followed,
+    each replayed by the live bench from the model of the last update before
+    it, as the page answered them reading by reading. The models are built
+    afresh, a few seconds each."""
+    from analysis import bench, bench_live
+    import export_model
+    conn = bench.open_read_only(path, live=bench.same_file(path, str(db.DB_PATH)))
+    conn.row_factory = sqlite3.Row
+    try:
+        comps = export_model.load_competitions(conn)
+        found = bench_live.measure(conn, "", until, bench.load_catalogue(bench.CATALOGUE), None,
+                                   bench.model_key(path), progress=False, learn=False)
+    finally:
+        conn.close()
+    return found["rows"], {c["id"]: str(c.get("end_time") or "") for c in comps}
+
+
+def last_blend(path: str = BLEND_PATH) -> dict:
+    """The blend.json a run is about to replace, {} when there is none."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            found = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    return found if isinstance(found, dict) else {}
+
+
+def add_by_share(result: dict, last: dict, path: str, now: str) -> bool:
+    """Puts the history's weight by share (`by_share`, and `by_share_cups`)
+    into `result`: learned at `now` on the feed's cups replayed from the
+    database at `path`; when the replay or the learning fails, the table of
+    the last blend.json (`last`) as it was. False when the table was not
+    learned."""
+    try:
+        rows, ends = share_rows(path, "9999-12-31")
+        cups: dict = {}
+        table = learn_by_share(rows, ends, now, cups)
+    except Exception as exc:  # the scales stand without it
+        kept = [key for key in ("by_share", "by_share_cups") if key in last]
+        for key in kept:
+            result[key] = last[key]
+        print(f"  the history's weight could not be learned ({type(exc).__name__}: {exc}): "
+              + ("the last table is kept" if "by_share" in kept else "there is no last table: k = 1"))
+        return False
+    result["by_share"], result["by_share_cups"] = table, cups
+    return True
 
 
 def pooled_from(pace: dict) -> dict:
@@ -151,13 +278,25 @@ def main() -> int:
     if not result["reading"] or not result["cold"]:
         print("Too few evenings followed to measure the scales; nothing written.")
         return 1
-    with open(BLEND_PATH, "w", encoding="utf-8") as fh:
+    print("Replaying the cups the feed followed, for the history's weight late in a session (minutes)...",
+          flush=True)
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    learned = add_by_share(result, last_blend(), str(db.DB_PATH), now)
+    # Written aside and moved in place: a run stopped midway leaves the last
+    # file whole.
+    with open(BLEND_PATH + ".part", "w", encoding="utf-8") as fh:
         json.dump(result, fh, indent=2, sort_keys=True)
+    os.replace(BLEND_PATH + ".part", BLEND_PATH)
     print(f"\n{result['evenings']} evenings followed by the feed, {result['reading']['rows']} readings.")
     print(f"  readings: typical error {result['reading']['scale']:.3f} of the pace's width")
     for source, (scale, n, cups) in result["cold"].items():
         print(f"  {source:<26} typical error {scale:.3f} of its band ({n} forecasts, {cups} cups)"
               f" -> its width counts x{scale / result['reading']['scale']:.2f} in the blend")
+    for tranche in SHARE_TRANCHES if "by_share" in result else ():
+        k = result["by_share"].get(tranche)
+        print(f"  history's weight, {tranche:<11} x{1 if k is None else k:g}"
+              f"   ({(result.get('by_share_cups') or {}).get(tranche, 0)} cups"
+              f"{'' if k is not None else ', too few: 1'}{'' if learned else ', kept from the last run'})")
     print(f"\nWrote {os.path.relpath(BLEND_PATH)} - the export carries it into model.json.")
     return 0
 

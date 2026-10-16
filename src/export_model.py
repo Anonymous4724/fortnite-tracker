@@ -522,8 +522,9 @@ def measured_pace() -> dict | None:
 def measured_blend() -> dict | None:
     """How the page weighs a cup's readings against its forecast from history:
     each side's typical error in units of its own width, measured by
-    analysis/blend.py on the evenings the feed followed. None when never
-    measured; the page then weighs the two widths as they stand."""
+    analysis/blend.py on the evenings the feed followed, and the weight left to
+    the history late in a session (`by_share`, by tranche of the session). None
+    when never measured; the page then weighs the two widths as they stand."""
     if not BLEND_PATH.exists():
         return None
     try:
@@ -533,7 +534,7 @@ def measured_blend() -> dict | None:
     reading = found.get("reading") or {}
     if not isinstance(found.get("cold"), dict) or not reading.get("scale"):
         return None
-    return {k: found.get(k) for k in ("generated", "evenings", "reading", "cold") if k in found}
+    return {k: found.get(k) for k in ("generated", "evenings", "reading", "cold", "by_share") if k in found}
 
 
 # "...Qual1Round1Day2_EU": the day of a round played over several days - one

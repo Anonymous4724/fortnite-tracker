@@ -86,12 +86,19 @@ def find_predictor(given: str | None) -> Path | None:
     return None
 
 
-def run(label: str, *command: str, cwd: Path | None = None, dry: bool = False) -> bool:
+def run(label: str, *command: str, cwd: Path | None = None, dry: bool = False,
+        timeout: float | None = None) -> bool:
+    """Run one step; False when it failed, or ran past `timeout` seconds and
+    was stopped."""
     print(f"\n{label}")
     print("  " + " ".join(command))
     if dry:
         return True
-    result = subprocess.run(list(command), cwd=str(cwd or ROOT))
+    try:
+        result = subprocess.run(list(command), cwd=str(cwd or ROOT), timeout=timeout)
+    except subprocess.TimeoutExpired:
+        print(f"\n  {label.split('.')[-1].strip()} was stopped: it ran past {timeout / 60:g} min.")
+        return False
     if result.returncode:
         print(f"\n  {label.split('.')[-1].strip()} failed (exit {result.returncode}). "
               f"Stopping here: nothing after this step ran.")
@@ -138,6 +145,11 @@ PACE_MAX_AGE_DAYS = 3
 PACE_PATH = ROOT / "analysis" / "pace.json"
 VALIDATION_PATH = ROOT / "analysis" / "validation.json"
 BLEND_PATH = ROOT / "analysis" / "blend.json"
+# The blend replays every cup the feed followed, each from the model of its
+# own cutoff, so it takes longer as the feed's evenings add up (minutes now).
+# Past this it is stopped, like a step that failed: the model keeps the last
+# weights, and the run goes on.
+BLEND_TIMEOUT = 20 * 60
 
 
 def stale(path: Path, script: str) -> bool:
@@ -362,7 +374,7 @@ def main() -> int:
                 print("  (the validation did not finish — the model keeps the last figures)")
         if args.pace or stale(BLEND_PATH, "blend.py"):
             if not run(label("The weight of a cup's readings against its history (minutes)"),
-                       py, "-m", "analysis.blend", cwd=ROOT, dry=args.dry_run):
+                       py, "-m", "analysis.blend", cwd=ROOT, dry=args.dry_run, timeout=BLEND_TIMEOUT):
                 print("  (the weights could not be measured — the model keeps the last ones)")
         if not run(label("Export the model (refused unless it reproduces the Python model)"),
                    py, str(HERE / "export_model.py"), dry=args.dry_run):

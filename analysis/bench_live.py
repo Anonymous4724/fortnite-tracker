@@ -109,7 +109,11 @@ The other options are the cold bench's. Readings from the feed exist from
 5 September 2026 on; a span that starts earlier measures the cups since then.
 The pace tables, the live multipliers and the blend the page reads come with
 the model as `analysis/pace.json` and `analysis/blend.json` hold them today,
-measured on the feed's evenings: in part on the same cups.
+measured on the feed's evenings: in part on the same cups. The weight the
+blend leaves to the history late in a session (`by_share`) is the exception:
+it is learned again at each cutoff, as `analysis/blend.py` learns it, on the
+answers of the cups that had ended by then - the cups the feed followed
+before the span are replayed first for that alone.
 """
 from __future__ import annotations
 
@@ -133,7 +137,7 @@ import calibration  # noqa: E402
 import export_model  # noqa: E402
 import harvest_osirion  # noqa: E402
 import rescore  # noqa: E402
-from analysis import coldbench, live  # noqa: E402
+from analysis import blend, coldbench, live  # noqa: E402
 
 # The points of a session the forecast is measured at: a share of the window,
 # or minutes past its close.
@@ -144,6 +148,7 @@ FEED_NOTE = "live feed%"
 # The page's own numbers, as app.html sets them.
 PACE_MIN_SHARE = 0.2          # below this share the evening gives no live answer
 CARRY_MIN = 0.05              # a smaller carry leaves an unread rank at its cold forecast
+NEAREST_FROM = 0.7            # from this share an unread rank takes the nearest rank read
 INTERP_REL = 0.04             # width per unit of log-gap between two readings
 RECENT_MINUTES = 25           # an older reading of a rank read since is history
 READ_MIN_SHARE = 0.1          # a rank's own reading counts from here
@@ -814,6 +819,7 @@ class Evening:
         if live_["settled"] and live_["points"].get(rank, 0) > 0:
             return {"value": live_["points"][rank], "rel": 0.0, "basis": "result", "live": None, "floor": 0}
         between = bracket_read(live_, rank) if own is None else None
+        nearest = None
         if own is not None:
             ratio, rel_live, basis = own, live_["rel_of"].get(rank, live_["rel_own"]), "read"
         elif between:
@@ -821,6 +827,11 @@ class Evening:
             ratio = between_reads(between, rank) / (cold["value"] * expected)
             gap = INTERP_REL * math.log(between["b"] / between["a"])
             rel_live, basis = math.sqrt(rel * rel + gap * gap), "between"
+        elif live_["share"] >= NEAREST_FROM and live_["by_rank"]:
+            nearest = nearest_read(live_["by_rank"], rank)
+            ratio = live_["by_rank"][nearest]
+            rel_live = math.sqrt(max(0.0, live_["rel_for"](rank) ** 2 + live_["rel"] ** 2 - live_["rel_own"] ** 2))
+            basis = "carried"
         elif live_["carry"] >= CARRY_MIN:
             ratio = live_["ratio"] ** live_["carry"]
             rel_live = math.sqrt(max(0.0, live_["rel_for"](rank) ** 2 + live_["rel"] ** 2 - live_["rel_own"] ** 2))
@@ -828,15 +839,21 @@ class Evening:
         else:
             return {"value": cold["value"], "rel": cold["rel"], "basis": "cold", "live": None, "floor": 0}
         from_readings = cold["value"] * ratio
-        scale = cold_weight_scale(self.model, cold["source"]) if live_["kind"] == "open_by_time" else 1
+        open_queue = live_["kind"] == "open_by_time"
+        scale = cold_weight_scale(self.model, cold["source"]) if open_queue else 1
+        k = share_weight(self.model, live_) if open_queue else 1
         wl = 1 / max(rel_live, 0.01) ** 2
-        wc = 1 / max(cold["rel"] * scale, 0.01) ** 2
+        wc_plain = 1 / max(cold["rel"] * scale, 0.01) ** 2
+        wc = k * wc_plain
         blended = (from_readings * wl + cold["value"] * wc) / (wl + wc)
         wc_band = 1 / max(cold["rel"], 0.01) ** 2
         floor = read_floor(live_, rank)
         at = (live_["clock_of"].get(rank) if own is not None else None) or (live_["share"], live_["after"])
         return {"value": max(blended, floor), "rel": 1 / math.sqrt(wl + wc_band), "floor": floor, "basis": basis,
-                "weight": wl / (wl + wc),
+                "weight": wl / (wl + wc), "nearest": nearest,
+                # The two sides of the blend before the history's weight by
+                # share, which analysis/blend.py learns that weight from.
+                "readings_weight": wl / (wl + wc_plain), "from_readings": from_readings,
                 "live": {"share": at[0], "after": at[1] or 0, "settled": live_["settled"], "rank": rank}}
 
     def bands(self, answer: dict) -> tuple[list, list]:
@@ -938,6 +955,21 @@ def cold_weight_scale(model: dict, source: str) -> float:
     if not reading > 0 or not row or not float(row[0] or 0) > 0:
         return 1.0
     return float(row[0]) / reading
+
+
+def nearest_read(by_rank: dict, rank: int) -> int:
+    """nearestRead: of the ranks read, the nearest to `rank` in log rank, the
+    shallower of two as near."""
+    return min(by_rank, key=lambda r: (abs(math.log(rank / r)), r))
+
+
+def share_weight(model: dict, live_: dict) -> float:
+    """shareWeight: what the history's weight in the blend is multiplied by at
+    the tranche of the session the evening stands at (`blend.by_share`,
+    analysis/blend.py); 1 where the model has none."""
+    tranche = blend.share_tranche(live_["share"], live_["after"])
+    got = ((model.get("blend") or {}).get("by_share") or {}).get(tranche) if tranche else None
+    return 1.0 if got is None else float(got)
 
 
 # --------------------------------------------------------------------------- #
@@ -1094,6 +1126,8 @@ def price_cup(conn, model: dict, comp: dict, catalogue: dict, cutoff: str, skipp
                 "rung": cold["source"] if cold and cold.get("ok")
                 else "none: " + str((cold or {}).get("reason") or ""),
                 "cold": cold["value"] if cold and cold.get("ok") else None,
+                "readings_weight": got.get("readings_weight"), "from_readings": got.get("from_readings"),
+                "tranche": blend.share_tranche(mine["share"], mine["after"]) if mine else None,
                 "field": mine["field"] if mine else 0,
                 "field_from": ("typed" if mine["typed"] else "counted" if mine["counted"] else "guessed")
                 if mine else "no live answer",
@@ -1131,19 +1165,37 @@ def feed_cups(conn, comps: list[dict], since: str, until: str) -> list[dict]:
 
 def measure(conn, since: str, until: str, catalogue: dict, cache: str | None, key: str, by: str = "update",
             progress: bool = True, updates: tuple = bench.UPDATES, strict: bool = True, arrival="feed",
-            old: bool = False, outages: bool = True) -> dict:
+            old: bool = False, outages: bool = True, learn: bool = True) -> dict:
     """Every cup the feed followed in [since, until), replayed from the model
     before it, each reading landing as `arrival` has it (`old` and `outages`:
-    see `price_cup`). {"rows", "cups",
+    see `price_cup`); with `learn`, the history's weight by share of each
+    model learned again on the cups that had ended by its cutoff. {"rows", "cups",
     "lines", "skipped", "refused", "early", "models", "built", "read",
-    "model_key", "replays", "live_pages", "bands", "pace", "blend"}."""
+    "model_key", "replays", "live_pages", "bands", "pace", "blend", "share_weights"}."""
     comps = export_model.load_competitions(conn)
     targets: dict = {}
     for comp in feed_cups(conn, comps, since, until):
         targets.setdefault(bench.cutoff_of(str(comp.get("start_time") or ""), by, updates), []).append(comp)
     models = bench.Models(conn, comps, key, cache)
     rows, lines, skipped, refused, sizes, replayed, early = [], [], Counter(), Counter(), {}, Counter(), Counter()
-    bands = pace = blend = None
+    bands = pace = blended = None
+    # The history's weight late in a session, learned at each cutoff on the
+    # answers of the cups that had ended by then, as the export learns it -
+    # never one table fitted on the span measured. The cups the feed followed
+    # before the span are replayed first for that alone, their boards not
+    # counted with the span's.
+    ends = {c["id"]: str(c.get("end_time") or "") for c in comps}
+    taught, weights = [], {}
+    if learn and since:
+        earlier: dict = {}
+        for comp in feed_cups(conn, comps, "", since):
+            earlier.setdefault(bench.cutoff_of(str(comp.get("start_time") or ""), by, updates), []).append(comp)
+        for cutoff in sorted(earlier):
+            model = models.get(cutoff)
+            for comp in sorted(earlier[cutoff], key=lambda c: (str(c.get("start_time")), c["id"])):
+                taught += price_cup(conn, model, comp, catalogue, cutoff, Counter(), Counter(), None, strict,
+                                    arrival, None, old, outages)[0]
+            del model
     reader, boards = rescore.rosters_of, {}
 
     def read_and_note(event_id, window_id):
@@ -1174,16 +1226,21 @@ def measure(conn, since: str, until: str, catalogue: dict, cache: str | None, ke
     try:
         for n, cutoff in enumerate(sorted(targets), 1):
             model = models.get(cutoff)
+            if learn:
+                weights[cutoff] = blend.learn_by_share(taught, ends, cutoff)
+                model = dict(model, blend=dict(model.get("blend") or {}, by_share=weights[cutoff]))
             sizes[cutoff] = {"tournaments": model["source"]["tournaments"], "cups": len(targets[cutoff])}
             quality = model.get("quality") or {}
             bands = bands or {"generated": quality.get("generated"), "from": quality.get("from")}
             pace = pace or {"generated": (model.get("pace") or {}).get("generated")}
-            blend = blend or {"generated": (model.get("blend") or {}).get("generated")}
+            blended = blended or {"generated": (model.get("blend") or {}).get("generated")}
             before = len(rows)
             for comp in sorted(targets[cutoff], key=lambda c: (str(c.get("start_time")), c["id"])):
                 got, line = price_cup(conn, model, comp, catalogue, cutoff, skipped, refused, replayed, strict,
                                       arrival, early, old, outages)
                 rows += got
+                if learn:
+                    taught += got
                 if line:
                     lines.append(line)
             if progress:
@@ -1206,7 +1263,7 @@ def measure(conn, since: str, until: str, catalogue: dict, cache: str | None, ke
             "live_pages": {"boards_asked": len(paged),
                            "boards_with_pages": sum(1 for n, _ in pages_read.values() if n),
                            "digest": hashlib.sha1("\n".join(paged).encode()).hexdigest()[:16]},
-            "bands": bands, "pace": pace, "blend": blend}
+            "bands": bands, "pace": pace, "blend": blended, "share_weights": weights if learn else None}
 
 
 # --------------------------------------------------------------------------- #
@@ -1486,6 +1543,7 @@ def shown(args, found: dict, seconds: float, mark: str, since: str, until: str, 
                       "sha1": bench.catalogue_sha1(args.catalogue)},
         "leaderboards": {"events": events}, "replays": found["replays"], "live_pages": found["live_pages"],
         "bands": found["bands"], "pace": found["pace"], "blend": found["blend"],
+        "share_weights": found.get("share_weights"),
         "model_key": found["model_key"], "ranks": list(bench.RANKS),
         "points": [{"label": p, "share": s, "after_close": a} for p, s, a in POINTS],
         # Two runs compare only under the same arrival, and the same cadence.

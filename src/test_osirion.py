@@ -2718,6 +2718,131 @@ def measuring_tools(workdir: str, replay_db: str, pages: str, live_db: str) -> N
            bool(page_side) and page_side["expected_for"](10) == page_side["share"],
            "empty" in bench_live.cup_flags(evening, evening.refine(mirror=True))))
 
+    # Late in a session: a rank read neither itself nor on both sides takes the
+    # nearest rank read, whole; the history's weight in the blend is the
+    # model's by tranche of the session, 1 where the model has none, and a
+    # closed lobby's is left as it is.
+    from analysis import blend as share_rule
+    check("the tranche of the session the history's weight is read at, at its edges",
+          [None, "0.7-0.9", "0.7-0.9", "0.9-1", "0.9-1", "after 0-10", "after 10+"],
+          [share_rule.share_tranche(s, a) for s, a in ((0.6999, 0), (0.7, 0), (0.8999, 0), (0.9, 0), (1, 0),
+                                                       (1, 10), (1, 10.01))])
+
+    def live_of(share, by_rank, after=0, kind="open_by_time"):
+        return {"ratio": 1.1, "rel": 0.05, "rel_own": 0.04, "carry": 0.0, "share": share, "after": after,
+                "kind": kind, "by_rank": by_rank, "points": {r: 50.0 for r in by_rank}, "read": sorted(by_rank),
+                "norm": {}, "rel_of": {r: 0.04 for r in by_rank}, "clock_of": {}, "solo": {}, "seen": {},
+                "settled": False, "final": False, "expected_for": lambda r: 1.0, "rel_for": lambda r: 0.04}
+
+    def probe(model, sealed=False):
+        ev = bench_live.Evening(model, {"name": "Probe Cup", "max_games": 6}, datetime(2026, 7, 20, 18),
+                                datetime(2026, 7, 20, 21), sealed)
+        ev._cold = {r: {"ok": True, "value": 100.0, "source": "previous edition", "rel": 0.2}
+                    for r in (5, 10, 20, 40, 1000)}
+        return ev
+
+    plain = {"blend": {"reading": {"scale": 0.2}, "cold": {"previous edition": [0.2, 300, 30]}}}
+    read = {10: 1.2, 40: 0.8}
+    got = [probe(plain).forecast(r, live_of(s, read)) for r, s in ((5, 0.7), (1000, 0.7), (5, 0.69))]
+    check("from 0.7 of the session an unread rank takes the nearest rank read, in log rank, whole; not before",
+          [(10, "carried", 120.0), (40, "carried", 80.0), (None, "cold", 100.0)],
+          [(g.get("nearest"), g["basis"], round(g.get("from_readings") or g["value"], 9)) for g in got])
+    framed = probe(plain).forecast(20, live_of(0.7, read))
+    check("from 0.7 of the session a rank read on both sides is still read between them, not at the nearest",
+          (None, "between", 50.0), (framed.get("nearest"), framed["basis"], round(framed["from_readings"], 9)))
+    weighted ={"blend": dict(plain["blend"], by_share={"0.9-1": 0.0, "after 10+": 0.5, "0.7-0.9": 1.0})}
+    pairs = [(probe(weighted).forecast(10, live_of(s, read, a)), probe(plain).forecast(10, live_of(s, read, a)))
+             for s, a in ((0.95, 0), (0.8, 0), (1, 5), (1, 15))]
+    check("the history's weight by share: 0 leaves the readings alone, 0.5 halves it, missing or 1 leaves the blend",
+          (120.0, 1.0, True, True, True, True),
+          (round(pairs[0][0]["value"], 9), pairs[0][0]["weight"], pairs[1][0] == pairs[1][1],
+           pairs[2][0] == pairs[2][1], pairs[3][1]["value"] < pairs[3][0]["value"] < 120.0,
+           all(a["readings_weight"] == b["readings_weight"] for a, b in pairs)))
+    sealed = [probe(m, True).forecast(10, live_of(0.95, read, kind="closed_by_game")) for m in (weighted, plain)]
+    check("a closed lobby keeps the history's weight as it was", True, sealed[0] == sealed[1])
+
+    def answer_row(cup, tranche, fr, cold, lobby=False, floor=0):
+        return {"id": cup, "lobby": lobby, "tranche": tranche, "readings_weight": 0.5, "from_readings": fr,
+                "cold": cold, "floor": floor, "result": 100.0}
+    ends = {cup: f"2026-07-{1 + cup % 28:02d} 20:00:00" for cup in range(40)}
+    ends[99] = "2026-08-02 20:00:00"
+    # Past the close the board's floor (100) is over both sides (80 and 90):
+    # every k answers the floor, a tie that goes to 1 - without the floor,
+    # the most history the grid has.
+    taught = ([answer_row(cup, "0.9-1", 100.0, 80.0) for cup in range(30)]
+              + [answer_row(cup, "0.7-0.9", 100.0, 80.0) for cup in range(29)]
+              + [answer_row(cup, "after 0-10", 80.0, 90.0, floor=100.0) for cup in range(30)]
+              + [answer_row(cup, "after 10+", 120.0, 100.0) for cup in range(30)]
+              + [answer_row(99, "0.7-0.9", 100.0, 80.0), answer_row(31, "0.7-0.9", 100.0, 80.0, lobby=True)])
+    cups: dict = {}
+    learned = share_rule.learn_by_share(taught, ends, "2026-08-01 16:00:00", cups)
+    check("the history's weight is learned on open queues, on the cups ended before the cutoff, 30 cups a tranche",
+          ({"0.9-1": 0.0, "after 0-10": 1.0, "after 10+": 2.0},
+           {"0.7-0.9": 29, "0.9-1": 30, "after 0-10": 30, "after 10+": 30}), (learned, cups))
+    check("each live answer carries the two sides of its blend and its tranche; each model, the weights of its cutoff",
+          (True, True), (bool(rows) and all("readings_weight" in r and "tranche" in r for r in rows),
+                         set(measured.get("share_weights") or {}) == {r["model"] for r in rows}))
+    blend_file = os.path.join(workdir, "blend.json")
+    with open(blend_file, "w", encoding="utf-8") as fh:
+        json.dump({"generated": "2026-10-16", "reading": {"scale": 0.18}, "cold": {"previous edition": [0.2, 300, 30]},
+                   "by_share": {"0.9-1": 0.1, "after 0-10": 0.0}, "by_share_cups": {"0.9-1": 40}}, fh)
+    kept_blend = export_model.BLEND_PATH
+    export_model.BLEND_PATH = type(kept_blend)(blend_file)
+    try:
+        carried = export_model.measured_blend() or {}
+    finally:
+        export_model.BLEND_PATH = kept_blend
+    check("the export carries the history's weight by share into the model, not the cups behind it",
+          ({"0.9-1": 0.1, "after 0-10": 0.0}, False), (carried.get("by_share"), "by_share_cups" in carried))
+
+    # The replay or the learning failing keeps the last blend.json's table as
+    # it was, and says so; never k = 1 for a table lost.
+    def broken(*args, **kwargs):
+        raise ValueError("math domain error")
+
+    kept_rows, kept_learn = share_rule.share_rows, share_rule.learn_by_share
+    fell_back, said = [], io.StringIO()
+    try:
+        with contextlib.redirect_stdout(said):
+            for rows_of, learn in ((broken, kept_learn), (lambda path, until: (taught, ends), broken),
+                                   (lambda path, until: (taught, ends), kept_learn)):
+                share_rule.share_rows, share_rule.learn_by_share = rows_of, learn
+                for last in (share_rule.last_blend(blend_file), {}):
+                    out = {"reading": {"scale": 0.2}}
+                    fell_back.append((share_rule.add_by_share(out, last, "unused.db", "2026-08-01 16:00:00"),
+                                      out.get("by_share"), out.get("by_share_cups")))
+    finally:
+        share_rule.share_rows, share_rule.learn_by_share = kept_rows, kept_learn
+    last_table = ({"0.9-1": 0.1, "after 0-10": 0.0}, {"0.9-1": 40})
+    check("a replay or a learning that fails keeps the last table of the history's weight, and says so",
+          [(False, *last_table), (False, None, None), (False, *last_table), (False, None, None),
+           (True, learned, cups), (True, learned, cups), 2, 2],
+          fell_back + [said.getvalue().count("the last table is kept"), said.getvalue().count("no last table")])
+
+    # The blend's step has a time limit: past it, it is stopped like a step that
+    # failed, and the run goes on with the last weights.
+    import refresh
+    started = time.monotonic()
+    with contextlib.redirect_stdout(io.StringIO()):
+        stopped = refresh.run("1. A step that hangs", sys.executable, "-c", "import time; time.sleep(60)", timeout=2)
+    waited = time.monotonic() - started
+    fake_ladder = os.path.join(workdir, "fake-ladder")
+    os.makedirs(os.path.join(fake_ladder, "src"), exist_ok=True)
+    for name in ("build.py", os.path.join("src", "app.html")):
+        open(os.path.join(fake_ladder, name), "w").close()
+    steps, kept_run, kept_argv = [], refresh.run, sys.argv
+    refresh.run = lambda label, *command, cwd=None, dry=False, timeout=None: steps.append((command, timeout)) or True
+    sys.argv = ["refresh.py", "--pace", "--dry-run", "--to", fake_ladder]
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            refresh.main()
+    finally:
+        refresh.run, sys.argv = kept_run, kept_argv
+    check("a step past its time limit is stopped and counts as failed; the blend's step has one, of minutes",
+          (False, True, [refresh.BLEND_TIMEOUT], True),
+          (stopped, waited < 30, [t for command, t in steps if "analysis.blend" in command],
+           600 <= refresh.BLEND_TIMEOUT <= 3600))
+
     # The feed's two regimes: until 4 October 2026, 16:45 UTC, the full pass
     # every ten minutes and the first page every five in the last twenty;
     # since, the full pass every five minutes and, twenty minutes either side
