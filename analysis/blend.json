@@ -1,7 +1,7 @@
 {
   "by_share": {
     "0.7-0.9": 0.1,
-    "0.9-1": 0.15,
+    "0.9-1": 0.1,
     "after 0-10": 0.03,
     "after 10+": 0.02
   },
@@ -38,6 +38,6 @@
   "note": "typical error over the width each side carries, on the evenings the feed followed: the page scales the history's width by cold / reading before blending",
   "reading": {
     "rows": 74113,
-    "scale": 0.1759
+    "scale": 0.1762
   }
 }
