@@ -146,7 +146,9 @@ def messages(calib: dict) -> dict:
             "unconfirmed_scoring": for_page(why(scoring_known=False)),
             "no_anchor": for_page(why()),
             # A template: the page fills in the rank and the lobby size.
-            "last_places": for_page(calibration.last_places_reason("{rank}", "{field}"))}
+            "last_places": for_page(calibration.last_places_reason("{rank}", "{field}")),
+            # A template too: the rank, the win's points and the matches.
+            "win_places": for_page(calibration.win_places_reason("{rank}", "{bonus}", "{games}"))}
 
 
 def for_page(text: str) -> str:
@@ -776,9 +778,13 @@ def field_sensitivity(rank: int, field: int, curve: dict) -> float:
 
 
 def max_game_score(scoring: dict) -> float:
-    """A win plus a full run of eliminations: the most one game can pay."""
+    """A win plus a full run of eliminations: the most one game can pay - to
+    the players a threshold is a total of, so second place where the win
+    itself qualifies (the port of predict.forecast_game_score)."""
     rows = (scoring or {}).get("placement") or []
     best = float(min(rows, key=lambda r: r[0])[2]) if rows else 0.0
+    if predict.win_bonus(scoring):
+        best = predict.placement_points(scoring, 2)
     cap = scoring.get("kill_cap")
     return best + float(cap or 8) * float(scoring.get("kill") or 0)
 
@@ -1066,7 +1072,7 @@ def lobby_estimate(model: dict, t: dict, rank: int, field: int) -> dict | None:
     scoring = t.get("scoring") or {}
     if games <= 0 or t.get("scoring_known") is False or not scoring.get("placement"):
         return None
-    best = predict.max_game_score(scoring, kills=scoring.get("kill_cap") or 8)
+    best = predict.forecast_game_score(scoring, kills=scoring.get("kill_cap") or 8)
     if best <= 0:
         return None
     rule = model.get("lobby_rule") or {}
@@ -1129,6 +1135,15 @@ def predict_from_model(model: dict, tournament: dict) -> dict | None:
             return {"ok": False, "reason": FIELD_BELOW_CUT}
     if rank < 1:
         return None
+    # The port of calibration.prior_prediction: where the win itself qualifies,
+    # the first places are the winners', one per match - no threshold there.
+    bonus = predict.win_bonus(tournament.get("scoring") or {})
+    games = int(tournament.get("max_games") or 0)
+    if bonus and rank <= games:
+        template = (model.get("messages") or {}).get("win_places") or \
+            for_page(calibration.win_places_reason("{rank}", "{bonus}", "{games}"))
+        return {"ok": False, "reason": template.replace("{rank}", str(int(rank)))
+                .replace("{bonus}", str(int(bonus))).replace("{games}", str(games))}
     # A later day of a round played over several days reads the day before as
     # its previous edition, and draws fewer players: with no field typed, the
     # reading is moved by what the later days measured so far did at this
@@ -1421,12 +1436,14 @@ def season_of_event(event_id) -> int | None:
     return int(found.group(1)) if found else None
 
 
-def closed_lobby(model: dict, row: dict) -> tuple[int, bool] | None:
+def closed_lobby(model: dict, row: dict, table: dict | None = None) -> tuple[int, bool] | None:
     """The port of the page's closedLobby: (field, guessed) when the calendar
     row is a single lobby, else None. A later round's field is the cut of the
     round before and the calendar carries it; otherwise the field the model's
     editions of the cup ranked, and a final of a cup it has never seen is a
-    lobby's worth."""
+    lobby's worth - and so is a session whose win qualifies (`table`, the
+    row's scoring table: see predict.win_bonus), which the FNCS plays in one
+    lobby per session, its winners leaving it one match after another."""
     cap = lobby_cap(model, row.get("team"), row.get("mode"))
     field = int(row.get("field") or 0)
     if field > 0:
@@ -1436,7 +1453,7 @@ def closed_lobby(model: dict, row: dict) -> tuple[int, bool] | None:
     known = category_row(model, asked) or family_row(model, asked)
     if known and known.get("field") and cap and known["field"] <= cap:
         return js_round(known["field"]), False
-    if cap and int(row.get("stage") or 0) in (8, 9):
+    if cap and (int(row.get("stage") or 0) in (8, 9) or predict.win_bonus(table or {})):
         return cap, True
     return None
 
@@ -1457,7 +1474,7 @@ def calendar_tournament(model: dict, row: dict, scorings: list) -> dict | None:
     games = int(row.get("games") or 0)
     if not team or not mode or mode == "Other" or not table or not table.get("placement") or games < 1:
         return None
-    closed = closed_lobby(model, row)
+    closed = closed_lobby(model, row, table)
     field = closed[0] if closed else int(row.get("field") or 0)
     season = season_of_event(row.get("event"))
     name = str(row.get("name") or "").strip()

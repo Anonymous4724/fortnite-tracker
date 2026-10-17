@@ -1591,7 +1591,7 @@ def lobby_estimate(comp: dict, calib: dict, rank: int, field: int) -> dict | Non
     scoring = comp.get("scoring") or {}
     if games <= 0 or comp.get("scoring_known") is False or not scoring.get("placement"):
         return None
-    best = predict.max_game_score(scoring, kills=scoring.get("kill_cap") or 8)
+    best = predict.forecast_game_score(scoring, kills=scoring.get("kill_cap") or 8)
     if best <= 0:
         return None
     game = comp.get("game_mode") or ""
@@ -1653,7 +1653,7 @@ def anchor_level(comp: dict, calib: dict) -> dict | None:
     # for a format never played before.
     scoring = comp.get("scoring") or {}
     if comp.get("scoring_known") is not False and scoring.get("placement"):
-        best = predict.max_game_score(scoring, kills=scoring.get("kill_cap") or 8)
+        best = predict.forecast_game_score(scoring, kills=scoring.get("kill_cap") or 8)
         table = pace.get("share_of_max") or {}
         game = comp.get("game_mode") or ""
         team = comp.get("team_mode") or ""
@@ -1816,6 +1816,15 @@ def prior_prediction(comp: dict, calib: dict, rank: int) -> dict | None:
     if rank < 1:
         return None
 
+    # Where the win itself qualifies (predict.win_bonus), the first places are
+    # the winners', one per match, at a thousand points and more: a total no
+    # player without a win reaches, and not a threshold anyone plays for. The
+    # previous edition's reading of them would only be its winners' scores.
+    bonus = predict.win_bonus(comp.get("scoring") or {})
+    games = int(comp.get("max_games") or 0)
+    if bonus and rank <= games:
+        return {"ok": False, "reason": win_places_reason(int(rank), int(bonus), games)}
+
     # Rung zero: this cup, this region, this rank, last time. Nothing is
     # modelled — see `direct_tables` for why that beats modelling it.
     direct = direct_from(comp, calib, rank, field)
@@ -1957,6 +1966,15 @@ def prior_prediction(comp: dict, calib: dict, rank: int) -> dict | None:
         "replay_deep": replay_deep,
         "sealed": predict.is_sealed(comp),
     }
+
+
+def win_places_reason(rank, bonus, games) -> str:
+    """Why the first places of a session whose win qualifies get no number.
+    Printed as given, so the export can hand the page a template."""
+    return (f"Rank {rank} goes to a match winner: a Victory Royale pays {bonus} points here "
+            f"and qualifies outright, and its winner plays no more, so the first {games} places "
+            f"are the winners of the {games} matches. No threshold is forecast for them, only "
+            f"for the ranks after.")
 
 
 def last_places_reason(rank, field) -> str:

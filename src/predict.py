@@ -706,6 +706,38 @@ def max_game_score(scoring: dict, kills: int = 8) -> float:
     return top_pts + kill_points(scoring, kills)
 
 
+# A win paying this much and at least five times second place is not a placement
+# but a qualification. The FNCS Solo Heats and Last Chance Qualifier in the
+# calendar of 17 October 2026 pay 1,000 points for a Victory Royale and 53 for
+# second place, where every other table in it pays 100 or less for a win; the
+# winner advances at once and plays no more matches.
+WIN_BONUS_MIN = 500.0
+
+
+def win_bonus(scoring: dict) -> float:
+    """The points a Victory Royale pays where the win itself qualifies (see
+    WIN_BONUS_MIN), else 0. The winners of such a session sit above everyone
+    else whatever they did before, so its first places are theirs, one per
+    match, and every threshold below them is a total of players without a
+    win."""
+    if not (scoring or {}).get("placement"):
+        return 0.0
+    first, second = placement_points(scoring, 1), placement_points(scoring, 2)
+    return first if first >= WIN_BONUS_MIN and first >= 5 * second else 0.0
+
+
+def forecast_game_score(scoring: dict, kills: int = 8) -> float:
+    """The most one game pays the players a threshold is a total of: a win and
+    a run of eliminations - except where the win is the qualification, whose
+    bonus no threshold below the winners holds, and the best game is second
+    place and the eliminations. Priced off the 1,000 points instead, the
+    closed-lobby rung put rank 35 of the FNCS Solo Heats in Asia (17 October)
+    at 2,330 points, where it ended at 111."""
+    if win_bonus(scoring):
+        return placement_points(scoring, 2) + kill_points(scoring, kills)
+    return max_game_score(scoring, kills)
+
+
 # --------------------------------------------------------------------------- #
 # Personal tracking: where I stand against the thresholds
 # --------------------------------------------------------------------------- #

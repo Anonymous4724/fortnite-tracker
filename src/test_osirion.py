@@ -825,6 +825,80 @@ def main() -> int:
         export_model.DB_PATH, sys.argv = saved_path, saved_argv
     check("an export that checked no forecast is not written", (1, False), (code, os.path.exists(out)))
 
+    # A session where the win itself qualifies: the FNCS Heats pay 1,000 points
+    # for a Victory Royale and the winner plays no more, so the first places
+    # are the winners' and every threshold below them is a total without a win.
+    import predict
+    heats_table = {"placement": [[1, 1, 1000], [2, 2, 53], [3, 3, 49], [4, 4, 47], [5, 5, 46]]
+                   + [[r, r, 51 - r] for r in range(6, 51)], "kill": 3.0}
+    check("a win of 1,000 points against 53 for second place qualifies", 1000.0, predict.win_bonus(heats_table))
+    check("a win of 60 against 53, or a hundred-point win and nothing else, does not",
+          (0.0, 0.0), (predict.win_bonus({"placement": [[1, 1, 60], [2, 2, 53]], "kill": 3.0}),
+                       predict.win_bonus({"placement": [[1, 1, 100]], "kill": 0})))
+    check("a thousand points for the win and nothing for second place qualifies too", 1000.0,
+          predict.win_bonus({"placement": [[1, 1, 1000]], "kill": 0}))
+    check("a win worth less than five times second place is a placement", 0.0,
+          predict.win_bonus({"placement": [[1, 1, 600], [2, 2, 200]], "kill": 1.0}))
+    check("the best game of a player without the win: second place and eight eliminations",
+          (53.0 + 24.0, 60.0 + 24.0),
+          (predict.forecast_game_score(heats_table, kills=8),
+           predict.forecast_game_score({"placement": [[1, 1, 60], [2, 2, 53]], "kill": 3.0}, kills=8)))
+
+    shop = os.path.join(workdir, "heats.db")
+    db.init_db(shop)
+    with db.session(shop) as conn:
+        for week, day in enumerate(("2026-07-04", "2026-07-11", "2026-07-18", "2026-07-25")):
+            cup(conn, "Solo Cup", "EU", day, 1200, 200 + 5 * week)
+            cup(conn, "Duo Cup", "EU", day, 40, 250 + week, team="Duo", stage="Final", games=6,
+                ranks=(1, 3, 5, 10, 20, 25))
+        for week, day in enumerate(("2026-07-05", "2026-07-12")):
+            cid = db.create_competition(conn, f"Solo Heats EU {day}", region="EU", team_mode="Solo",
+                                        start_time=f"{day} 18:00", end_time=f"{day} 21:00",
+                                        ranks=[1, 3, 5, 10, 20, 25, 35, 50], max_games=6, scoring=heats_table)
+            db.update_competition(conn, cid, family="Solo Heats", field_size=99, finished_at=f"{day} 21:00")
+            db.set_finals(conn, cid, {1: 1150.0 + week, 3: 1080.0, 5: 1040.0, 10: 180.0 + week,
+                                      20: 160.0, 25: 150.0, 35: 135.0 + week, 50: 100.0})
+        comps = export_model.load_competitions(conn)
+        calib = export_model.calibration_of(comps)
+        model = export_model.build_model(conn, comps, calib)
+        found = export_model.verify(model, comps, calib)
+        check("with sessions whose win qualifies in the history, the export still reproduces the model",
+              (True, 0), (len(found["diffs"]) > 0, len(found["mismatches"])))
+        heats = [c for c in comps if c.get("family") == "Solo Heats"]
+        found = export_model.verify(model, heats, calib)
+        check("and on those sessions alone, every branch, the winners' places refused on both sides",
+              (True, 0, True), (len(found["diffs"]) > 0, len(found["mismatches"]),
+                                any(reach == "refused" for (_, reach) in found["covered"])))
+
+        def heats_form(rank, **over):
+            return dict({"category": "Solo Heats", "name": "Solo Heats", "region": "EU", "team_mode": "Solo",
+                         "game_mode": "Battle Royale", "max_games": 6, "field_size": 99,
+                         "scoring": heats_table, "scoring_known": True, "rank": rank}, **over)
+
+        refused = export_model.predict_from_model(model, heats_form(3))
+        want = calibration.prior_prediction(dict(heats_form(3), kind="Solo Heats", family="Solo Heats"), calib, 3)
+        check("rank 3 of six matches goes to a winner: refused, and said the same on both sides",
+              (False, True, export_model.for_page(want.get("reason") or "")),
+              (refused.get("ok"), "goes to a match winner" in (refused.get("reason") or ""), refused.get("reason")))
+        own = export_model.predict_from_model(model, heats_form(35))
+        check("rank 35 is read off the cup's own editions, below the winners", ("previous edition", True),
+              (own.get("source"), 130 <= own.get("value", 0) <= 140))
+        unseen = export_model.predict_from_model(model, heats_form(35, category="Other Heats", name="Other Heats",
+                                                                   region="ASIA"))
+        best = predict.forecast_game_score(heats_table, kills=8)
+        check("a session never seen is a closed lobby priced off second place, not the 1,000 points",
+              ("closed lobby", True), (unseen.get("source"), 0 < unseen.get("value", 0) <= 6 * best))
+        row = {"name": "Other Heats", "kind": "Other Heats", "region": "ASIA", "team": "Solo",
+               "mode": "Battle Royale", "games": 6, "scoring": 0, "field": 0, "stage": 0,
+               "tiers": [["q", 35, "Finalist"], ["q", 50, "Last Chance Final"]],
+               "begin": "2026-10-17T05:00Z", "end": "2026-10-17T07:40Z", "event": "e", "window": "w"}
+        check("a calendar row whose win qualifies is one lobby, its size guessed",
+              ((100, True), None),
+              (export_model.closed_lobby(model, row, heats_table), export_model.closed_lobby(model, row)))
+        listed = export_model.calendar_forecast(model, row, [heats_table])
+        check("and the list prices its cut, never the winners' places",
+              (True, [50]), (listed.get("lobby"), [r[0] for r in listed.get("ranks", [])]))
+
     print("\n16. A later day of a round: the day before, moved as the later days moved")
     # A qualifier whose first round is played over two days, in two regions:
     # its first round measured whole, its second with the first day played and
