@@ -1,11 +1,11 @@
 """Bring the live feed's readings into the database, by Epic's ids.
 
 The predictor's live feed reads the standings of every cup under way every
-ten minutes and keeps a day's worth of those readings per window. This pulls
+few minutes and keeps a day's worth of those readings per window. This pulls
 the last few days back and files each reading as a snapshot of the matching
 tournament - matched on the event and window ids the harvest stores, so
 nothing is guessed from a name - and the live models finally get what they
-have always lacked: tournaments read every ten minutes, dozens a week, taken
+have always lacked: tournaments read every few minutes, dozens a week, taken
 by nobody.
 
     python src/pull_live.py                  # the last 3 days, from the feed in site.json
@@ -19,6 +19,18 @@ has not built yet - the leaderboard is downloaded once the window is over,
 usually the next day - waits in `data/live_pending.json` and is filed on a
 later run. A reading already filed (same tournament, same minute) is not
 filed twice.
+
+The feed's pages are not all stamped at the same minute, and it can look at
+one first page several times while the pages behind it are renewed: one of
+its records can hold a rank stamped at a minute whose first page only comes
+in a later record, and several records can share a first page. Every rank is
+filed at the minute its own page was stamped, with everything else read at
+that minute, whichever record it came in; and a snapshot filed from the feed
+on an earlier run is completed with the ranks it lacked, none of the points
+it holds rewritten. Where a minute holds several snapshots from the feed, the
+ranks it lacks are those none of them holds, and the last of them takes
+them. A snapshot that gains the ranks of its own first page takes that
+record's games, pages and flags as well, as one filed whole would.
 
 The board the feed read once the cup had settled - twenty minutes past the
 close, see SETTLED_MINUTES - is also filed as the final at the ranks the
@@ -110,10 +122,30 @@ def save_pending(pending: dict) -> None:
     PENDING.write_text(json.dumps(pending, ensure_ascii=False, indent=1), encoding="utf-8")
 
 
+def joined(earlier: dict | None, later: dict) -> dict:
+    """Two of the feed's records for one first page, as one: the later one's
+    own fields, and every reading either of them holds. The same rank read
+    off its page at two stamps is two readings, and both are kept."""
+    if not earlier:
+        return later
+    out = dict(later)
+    readings, seen = [], set()
+    for r in list(earlier.get("readings") or []) + list(later.get("readings") or []):
+        key = json.dumps(r, sort_keys=True)
+        if key not in seen:
+            seen.add(key)
+            readings.append(r)
+    out["readings"] = readings
+    counted = [int(x.get("ranked") or 0) for x in (earlier, later)]
+    if max(counted) > 0:
+        out["ranked"] = max(counted)
+    return out
+
+
 def gather(feed: str, days: int) -> dict:
     """Every window the feed read over the last `days`, readings merged by minute."""
     windows: dict = {}
-    for day in days_back(days):
+    for day in reversed(days_back(days)):         # oldest first: a record kept in two days' files is joined as it grew
         doc = fetch(f"{feed}/history/{day}.json")
         if not doc:
             continue
@@ -123,7 +155,7 @@ def gather(feed: str, days: int) -> dict:
             for reading in window.get("readings") or []:
                 when = stamp(reading.get("updated"))
                 if when:
-                    kept["readings"][when] = reading
+                    kept["readings"][when] = joined(kept["readings"].get(when), reading)
     return windows
 
 
@@ -155,11 +187,26 @@ def settled_points(window: dict) -> dict[int, float]:
 
 
 def file_window(conn, window: dict, dry: bool) -> tuple[int, int]:
-    """(filed, already there) for one window whose tournament exists."""
+    """(filed, already there) for one window whose tournament exists. A
+    snapshot completed with ranks it lacked counts as filed."""
     comp = db.find_by_window(conn, window.get("event") or "", window.get("window") or "")
     if not comp:
         return -1, 0
-    seen = {str(s["ts"])[:16] for s in db.get_snapshots(conn, comp["id"])}
+    # What the tournament holds, by minute. Where a minute holds a reading
+    # typed by hand and one from the feed, the feed's is the one to complete.
+    # Where it holds several from the feed - the same minute filed by more
+    # than one run - the last is the one to complete, the one the bench reads
+    # the minute's fields off, and the ranks it counts as held are all of
+    # theirs: a rank one of them has is not filed again on another.
+    there: dict[str, dict] = {}
+    for snap in db.get_snapshots(conn, comp["id"]):
+        minute = str(snap["ts"])[:16]
+        mine = {"id": snap["id"], "note": snap.get("note") or "", "points": dict(snap.get("points") or {})}
+        held = there.get(minute)
+        if held is None or (from_feed(mine) and not from_feed(held)):
+            there[minute] = mine
+        elif from_feed(mine):
+            there[minute] = {**mine, "points": {**held["points"], **mine["points"]}}
     filed = skipped = 0
     # How many played, where the feed counted them: off the board's last
     # page, or past the API's ten thousand off Epic's percentiles, where the
@@ -179,11 +226,15 @@ def file_window(conn, window: dict, dry: bool) -> tuple[int, int]:
         if added:
             print(f"  finals    {window.get('name') or ''} ({window.get('region') or '?'}): "
                   f"ranks {', '.join(str(r) for r in added)} from the settled board")
+    # `[rank, points]`, or `[rank, points, stamp]` where the feed read that
+    # rank off a page the API stamped at another minute: the run is not one
+    # board, and each minute is filed as the reading it is. The minutes are
+    # put together across every record first - a cut's page is often stamped
+    # a minute or two ahead of the first page it was read under, and the
+    # first page of that minute then comes in a later record: filed record by
+    # record, the cut would take the minute and the top hundred be left out.
+    minutes: dict[str, dict] = {}
     for when, reading in sorted(window["readings"].items()):
-        # `[rank, points]`, or `[rank, points, stamp]` where the feed read
-        # that rank off a page the API stamped at another minute: the run is
-        # not one board, and each minute is filed as the reading it is.
-        groups: dict[str, dict[int, float]] = {}
         for r in reading.get("readings") or []:
             if not isinstance(r, list) or len(r) < 2:
                 continue
@@ -197,27 +248,60 @@ def file_window(conn, window: dict, dry: bool) -> tuple[int, int]:
             # ISO with a T: read into the database's spelling, or it never
             # matches a minute already filed and every pull files it again.
             minute = (stamp(r[2]) if len(r) > 2 and r[2] else None) or when[:16]
-            groups.setdefault(minute, {})[rank] = value
-        for minute, points in sorted(groups.items()):
-            if minute in seen:
+            slot = minutes.setdefault(minute, {"points": {}, "reading": reading, "own": False})
+            slot["points"][rank] = value
+            # The record whose first page is this minute says how far along
+            # the session was; failing one, the record the rank came in.
+            if minute == when[:16] and not slot["own"]:
+                slot["reading"], slot["own"] = reading, True
+    for minute, slot in sorted(minutes.items()):
+        points, reading = slot["points"], slot["reading"]
+        note = ("live feed" + (" · final" if reading.get("final") else "")
+                + (" · game under way" if reading.get("partial") else ""))
+        held = there.get(minute)
+        if held is not None:
+            # Filed on an earlier run. A snapshot from the feed that lacks
+            # ranks read at its minute gets them; the readings it holds are
+            # not touched, and neither is a reading typed by hand.
+            lacking = {rank: value for rank, value in points.items() if rank not in held["points"]}
+            if lacking and from_feed(held):
+                if not dry:
+                    db.set_points(conn, held["id"], lacking)
+                    if slot["own"]:
+                        # The ranks it lacked are the first page's, so the
+                        # games and pages and the flags are that record's, not
+                        # those of the one that carried a cut's page alone.
+                        # A record without a count of rosters leaves the one
+                        # the snapshot has: who had played by then is worth
+                        # more than none.
+                        conn.execute("UPDATE snapshot SET games = COALESCE(?, games), pages = COALESCE(?, pages), "
+                                     "ranked = COALESCE(?, ranked), note = ? WHERE id = ?",
+                                     (reading.get("games") or None, reading.get("pages") or None,
+                                      reading.get("ranked") or None, note, held["id"]))
+                held["points"].update(lacking)
+                filed += 1
+            else:
                 skipped += 1
-                continue
-            ts = when if minute == when[:16] else minute
-            if not dry:
-                # A sealed lobby's reading is the board at the end of its last
-                # finished game, and says when a game was under way at the time.
-                db.add_snapshot(conn, comp["id"], ts=ts, points=points,
-                                games=reading.get("games") or None,
-                                # The board's page count at the reading, and
-                                # the exact count of rosters where the feed
-                                # read the last page too: who had played by then.
-                                pages=reading.get("pages") or None,
-                                ranked=reading.get("ranked") or None,
-                                note="live feed" + (" · final" if reading.get("final") else "")
-                                     + (" · game under way" if reading.get("partial") else ""))
-            seen.add(minute)
-            filed += 1
+            continue
+        sid = None
+        if not dry:
+            # A sealed lobby's reading is the board at the end of its last
+            # finished game, and says when a game was under way at the time.
+            sid = db.add_snapshot(conn, comp["id"], ts=minute, points=points,
+                                  games=reading.get("games") or None,
+                                  # The board's page count at the reading, and
+                                  # the exact count of rosters where the feed
+                                  # read the last page too: who had played by then.
+                                  pages=reading.get("pages") or None,
+                                  ranked=reading.get("ranked") or None,
+                                  note=note)
+        there[minute] = {"id": sid, "note": note, "points": dict(points)}
+        filed += 1
     return filed, skipped
+
+
+def from_feed(snapshot: dict) -> bool:
+    return str(snapshot.get("note") or "").startswith("live feed")
 
 
 def main() -> int:
@@ -239,7 +323,8 @@ def main() -> int:
     for key, window in pending.items():
         kept = windows.setdefault(key, {**{k: window.get(k) for k in ("event", "window", "name", "region", "begin", "end")},
                                         "readings": {}})
-        kept["readings"].update(window.get("readings") or {})
+        for when, reading in (window.get("readings") or {}).items():
+            kept["readings"][when] = joined(reading, kept["readings"].get(when)) if when in kept["readings"] else reading
     print(f"windows   : {len(windows)} read by the feed, "
           f"{sum(len(w['readings']) for w in windows.values())} readings")
 

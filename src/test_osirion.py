@@ -577,6 +577,287 @@ def main() -> int:
               ["2026-09-28 18:38", "2026-09-28 18:40", "2026-09-28 18:50"],
               [str(s["ts"])[:16] for s in db.get_snapshots(conn, followed)])
 
+    # The feed reads a cut's page, or any deep rank's, with an updatedAt a
+    # minute or two ahead of its first page. The record that carries it files
+    # that minute, and the first page of the minute, in the record after, has
+    # to land beside it - not be left out for the minute being taken.
+    from contextlib import redirect_stdout
+    from pathlib import Path
+
+    def feed_cup(name, built=True):
+        window_id = f"S42_{name}_Event1Round1_NAC"
+        header = {"event": f"epicgames_S42_{name}_NAC", "window": window_id, "name": name, "region": "NAC",
+                  "begin": "2026-09-29T17:00:00.000Z", "end": "2026-09-29T20:00:00.000Z"}
+        cid = None
+        if built:
+            with db.session() as conn:
+                cid = db.create_competition(conn, name, region="NAC",
+                                            start_time="2026-09-29 17:00", end_time="2026-09-29 20:00")
+                db.update_competition(conn, cid, event_id=header["event"], window_id=window_id)
+        return cid, header
+
+    def feed_doc(header, records):
+        return {"windows": {header["window"]: dict(header, readings=records)}}
+
+    def feed_pull(doc):
+        """One pull of a day, as refresh.py runs it: (filed, already there)."""
+        pull_live.fetch = lambda url: doc
+        try:
+            total = [0, 0]
+            with db.session() as conn:
+                for found in pull_live.gather("https://feed.invalid", 1).values():
+                    for n, part in enumerate(pull_live.file_window(conn, found, False)):
+                        total[n] += part
+            return tuple(total)
+        finally:
+            pull_live.fetch = real_fetch
+
+    def feed_board(cid):
+        with db.session() as conn:
+            return [(str(s["ts"])[11:16], s["games"], s["points"], s["note"]) for s in db.get_snapshots(conn, cid)]
+
+    ahead = ({"updated": "2026-09-29T18:00:10.200Z", "games": 2,
+              "readings": [[100, 50.0], [500, 30.0], [1000, 20.0, "2026-09-29T18:01:04.000Z"]]},
+             {"updated": "2026-09-29T18:01:12.300Z", "games": 3, "partial": True,
+              "readings": [[100, 60.0], [500, 35.0]]})
+    ahead_board = [("18:00", 2, {100: 50.0, 500: 30.0}, "live feed"),
+                   ("18:01", 3, {100: 60.0, 500: 35.0, 1000: 20.0}, "live feed · game under way")]
+    cup, head = feed_cup("AheadCup")
+    doc = feed_doc(head, list(ahead))
+    first = feed_pull(doc)
+    board = feed_board(cup)
+    check("a rank stamped a minute ahead of its first page is filed with that minute's first page, once",
+          (2, ahead_board), (first[0], board))
+    check("and a pull again files nothing more and changes nothing", ((0, 2), board),
+          (feed_pull(doc), feed_board(cup)))
+    cup, head = feed_cup("AheadLateCup")
+    feed_pull(feed_doc(head, list(reversed(ahead))))
+    check("the order the records come in changes nothing", ahead_board, feed_board(cup))
+
+    # What an earlier version of the pull filed - the minute with the ahead
+    # rank alone - is completed with the ranks it lacked, whatever it holds
+    # is left as it is. A reading typed by hand at a minute is not touched.
+    cup, head = feed_cup("CompletedCup")
+    with db.session() as conn:
+        db.add_snapshot(conn, cup, ts="2026-09-29 18:00", points={100: 50.0}, games=2, note="live feed")
+        db.add_snapshot(conn, cup, ts="2026-09-29 18:01", points={1000: 19.0}, games=3,
+                        note="live feed · game under way")
+    done = feed_pull(feed_doc(head, list(ahead)))
+    check("a minute filed by an earlier pull is completed with the ranks it lacked, what it holds kept as it is",
+          ((2, 0), [("18:00", 2, {100: 50.0, 500: 30.0}, "live feed"),
+                    ("18:01", 3, {100: 60.0, 500: 35.0, 1000: 19.0}, "live feed · game under way")]),
+          (done, feed_board(cup)))
+    cup, head = feed_cup("HandCup")
+    with db.session() as conn:
+        db.add_snapshot(conn, cup, ts="2026-09-29 18:00", points={100: 50.0}, games=2, note="live feed")
+        db.add_snapshot(conn, cup, ts="2026-09-29 18:01", points={100: 61.0}, games=3, note="typed in")
+    feed_pull(feed_doc(head, list(ahead)))
+    check("a reading typed by hand at a minute of the feed is left as it is, the feed's completed beside it",
+          [("18:00", 2, {100: 50.0, 500: 30.0}, "live feed"), ("18:01", 3, {100: 61.0}, "typed in")],
+          feed_board(cup))
+
+    # One first page the feed looked at twice, the page of a cut renewed
+    # between the looks: both ranks are readings, each at its own stamp, and
+    # the record's fields are the later look's, bar the count of rosters.
+    seen_twice = ({"updated": "2026-09-29T18:10:05.000Z", "games": 4, "ranked": 1200, "final": False,
+                   "readings": [[100, 70.0], [1000, 40.0, "2026-09-29T18:08:30.000Z"]]},
+                  {"updated": "2026-09-29T18:10:05.000Z", "games": 4, "final": True,
+                   "readings": [[100, 70.0], [1000, 44.0, "2026-09-29T18:09:30.000Z"]]})
+    cup, head = feed_cup("TwiceCup")
+    feed_pull(feed_doc(head, list(seen_twice)))
+    with db.session() as conn:
+        rows = conn.execute("SELECT substr(ts, 12, 5), note, ranked FROM snapshot WHERE competition_id = ? "
+                            "ORDER BY ts", (cup,)).fetchall()
+    check("two readings of one rank at two stamps, under one first page, are both kept",
+          [("18:08", {1000: 40.0}), ("18:09", {1000: 44.0}), ("18:10", {100: 70.0})],
+          [(when, points) for when, _, points, _ in feed_board(cup)])
+    check("a first page looked at twice takes the later look's flags and the largest count of rosters",
+          [("18:08", "live feed · final", 1200), ("18:09", "live feed · final", 1200),
+           ("18:10", "live feed · final", 1200)],
+          [tuple(row) for row in rows])
+    pull_live.fetch = lambda url: feed_doc(head, list(seen_twice))
+    try:
+        gathered = list(pull_live.gather("https://feed.invalid", 1)[head["window"]]["readings"].values())
+    finally:
+        pull_live.fetch = real_fetch
+    check("two records of one first page are one: their readings once each, the rest the later's",
+          [(3, 1200, True)], [(len(r["readings"]), r.get("ranked"), r.get("final")) for r in gathered])
+
+    # The ranks a completed snapshot gains are those of its first page, and
+    # the page's record says how far along the session was and how many had
+    # played: a snapshot filed whole takes those from that record, so a
+    # snapshot completed later does too. A pull that stopped between the cut's
+    # page and the first page must not leave the minute with the older record's
+    # games and flags.
+    def feed_fields(cid):
+        with db.session() as conn:
+            rows = conn.execute("SELECT substr(ts, 12, 5), games, pages, ranked, note FROM snapshot "
+                                "WHERE competition_id = ? ORDER BY ts, id", (cid,)).fetchall()
+        return [tuple(row) for row in rows]
+
+    counted_ahead = ({"updated": "2026-09-29T18:00:10.200Z", "games": 2, "pages": 1, "ranked": 700,
+                      "readings": [[100, 50.0], [1000, 20.0, "2026-09-29T18:01:04.000Z"]]},
+                     {"updated": "2026-09-29T18:01:12.300Z", "games": 3, "pages": 2, "ranked": 800, "partial": True,
+                      "readings": [[100, 60.0]]})
+    cup, head = feed_cup("CountedCup")
+    with db.session() as conn:
+        db.add_snapshot(conn, cup, ts="2026-09-29 18:01", points={1000: 19.0}, games=2, pages=1, ranked=700,
+                        note="live feed")
+    feed_pull(feed_doc(head, list(counted_ahead)))
+    completed_fields = feed_fields(cup)
+    check("a snapshot completed with its first page's ranks takes that record's games, pages, count and "
+          "flags, and a pull again changes nothing",
+          ([("18:00", 2, 1, 700, "live feed"), ("18:01", 3, 2, 800, "live feed · game under way")], (0, 2), True),
+          (completed_fields, feed_pull(feed_doc(head, list(counted_ahead))), feed_fields(cup) == completed_fields))
+    cup, head = feed_cup("KeptCup")
+    with db.session() as conn:
+        db.add_snapshot(conn, cup, ts="2026-09-29 18:01", points={1000: 19.0}, games=2, pages=5, ranked=900,
+                        note="live feed")
+    feed_pull(feed_doc(head, [counted_ahead[0], {"updated": "2026-09-29T18:01:12.300Z", "games": 3,
+                                                 "readings": [[100, 60.0]]}]))
+    check("a count the first page's record does not carry is the one the snapshot already had",
+          [("18:00", 2, 1, 700, "live feed"), ("18:01", 3, 5, 900, "live feed")], feed_fields(cup))
+    cup, head = feed_cup("TypedCup")
+    with db.session() as conn:
+        db.add_snapshot(conn, cup, ts="2026-09-29 18:01", points={100: 61.0}, games=7, note="typed in")
+    feed_pull(feed_doc(head, list(counted_ahead)))
+    check("a reading typed by hand keeps its games, flags and ranks beside the feed's",
+          ([("18:00", 2, 1, 700, "live feed"), ("18:01", 7, None, None, "typed in")],
+           [{100: 50.0}, {100: 61.0}]),
+          (feed_fields(cup), [points for _, _, points, _ in feed_board(cup)]))
+    cup, head = feed_cup("CutOnlyCup")
+    with db.session() as conn:
+        db.add_snapshot(conn, cup, ts="2026-09-29 18:01", points={1000: 19.0}, games=9, pages=8, ranked=650,
+                        note="live feed · final")
+    feed_pull(feed_doc(head, [{"updated": "2026-09-29T18:00:10.200Z", "games": 2, "pages": 1, "ranked": 700,
+                               "readings": [[100, 50.0], [500, 30.0, "2026-09-29T18:01:04.000Z"],
+                                            [1000, 20.0, "2026-09-29T18:01:04.000Z"]]}]))
+    check("a snapshot completed from the record of a cut's page, its own first page not seen, keeps its fields",
+          ([("18:00", 2, 1, 700, "live feed"), ("18:01", 9, 8, 650, "live feed · final")],
+           {500: 30.0, 1000: 19.0}),
+          (feed_fields(cup), feed_board(cup)[1][2]))
+
+    # A minute the database holds twice from the feed - filed by more than one
+    # run - has the ranks of both: a rank either holds is not filed again on
+    # the other, and only the last of them is completed with the rest.
+    cup, head = feed_cup("TwoFilesCup")
+    with db.session() as conn:
+        db.add_snapshot(conn, cup, ts="2026-09-29 18:01", points={100: 60.0}, games=1, note="live feed")
+        db.add_snapshot(conn, cup, ts="2026-09-29 18:01", points={1000: 19.0}, games=2, pages=1, ranked=700,
+                        note="live feed")
+    done = feed_pull(feed_doc(head, list(ahead)))
+    check("a minute held twice from the feed is completed once, on its last, with the ranks neither holds",
+          ((2, 0), [("18:00", 2, None, None, "live feed"), ("18:01", 1, None, None, "live feed"),
+                    ("18:01", 3, 1, 700, "live feed · game under way")],
+           [{100: 50.0, 500: 30.0}, {100: 60.0}, {500: 35.0, 1000: 19.0}]),
+          (done, feed_fields(cup), [points for _, _, points, _ in feed_board(cup)]))
+    cup, head = feed_cup("HeldAcrossCup")
+    with db.session() as conn:
+        db.add_snapshot(conn, cup, ts="2026-09-29 18:01", points={100: 60.0, 500: 35.0}, games=1, note="live feed")
+        db.add_snapshot(conn, cup, ts="2026-09-29 18:01", points={1000: 19.0}, games=2, pages=1, ranked=700,
+                        note="live feed")
+    held_across = feed_pull(feed_doc(head, list(ahead)))
+    check("a minute whose ranks are all held between two snapshots from the feed gains nothing, and keeps both",
+          ((1, 1), [("18:00", 2, None, None, "live feed"), ("18:01", 1, None, None, "live feed"),
+                    ("18:01", 2, 1, 700, "live feed")],
+           [{100: 50.0, 500: 30.0}, {100: 60.0, 500: 35.0}, {1000: 19.0}]),
+          (held_across, feed_fields(cup), [points for _, _, points, _ in feed_board(cup)]))
+    cup, head = feed_cup("HandFirstCup")
+    with db.session() as conn:
+        db.add_snapshot(conn, cup, ts="2026-09-29 18:01", points={100: 61.0}, games=7, note="typed in")
+        db.add_snapshot(conn, cup, ts="2026-09-29 18:01", points={1000: 19.0}, games=2, note="live feed")
+    feed_pull(feed_doc(head, list(ahead)))
+    check("a reading typed by hand and one from the feed at one minute: the feed's is the one completed",
+          ([("18:00", 2, "live feed"), ("18:01", 7, "typed in"), ("18:01", 3, "live feed · game under way")],
+           [{100: 50.0, 500: 30.0}, {100: 61.0}, {100: 60.0, 500: 35.0, 1000: 19.0}]),
+          ([(when, games, note) for when, games, _, _, note in feed_fields(cup)],
+           [points for _, _, points, _ in feed_board(cup)]))
+
+    # The count of rosters is the largest either look at a first page had,
+    # whichever came first; a rank read twice at the same value, at two
+    # stamps, is two readings.
+    for order, name in ((1, "CountedTwiceCup"), (-1, "CountedTwiceLateCup")):
+        cup, head = feed_cup(name)
+        looks = [{"updated": "2026-09-29T18:10:05.000Z", "games": 4, "ranked": 1500, "readings": [[100, 70.0]]},
+                 {"updated": "2026-09-29T18:10:05.000Z", "games": 4, "ranked": 1200,
+                  "readings": [[100, 70.0], [500, 40.0]]}]
+        feed_pull(feed_doc(head, looks[::order]))
+        check(f"two looks at one first page keep the larger count of rosters, whether it came "
+              f"{'first' if order == 1 else 'last'}",
+              [("18:10", 1500)], [(when, ranked) for when, _, _, ranked, _ in feed_fields(cup)])
+    cup, head = feed_cup("SameValueCup")
+    feed_pull(feed_doc(head, [{"updated": "2026-09-29T18:10:05.000Z", "games": 4,
+                               "readings": [[100, 70.0], [1000, 40.0, "2026-09-29T18:08:30.000Z"]]},
+                              {"updated": "2026-09-29T18:10:05.000Z", "games": 4,
+                               "readings": [[100, 70.0], [1000, 40.0, "2026-09-29T18:09:30.000Z"]]}]))
+    check("a rank read at the same points at two stamps, under one first page, is two readings",
+          [("18:08", {1000: 40.0}), ("18:09", {1000: 40.0}), ("18:10", {100: 70.0})],
+          [(when, points) for when, _, points, _ in feed_board(cup)])
+
+    # A window that crosses midnight UTC is in two days' files, the record
+    # under way in both: the later day's file holds it as it grew.
+    cup, head = feed_cup("MidnightCup", built=False)
+    midnight = {"2026-10-17": feed_doc(head, [{"updated": "2026-10-17T23:56:17.251Z", "games": 11, "ranked": 33095,
+                                               "final": False, "readings": [[1, 437.0]]}]),
+                "2026-10-18": feed_doc(head, [{"updated": "2026-10-17T23:56:17.251Z", "games": 11, "ranked": 33375,
+                                               "final": True, "readings": [[1, 437.0], [100, 300.0]]}])}
+    real_days = pull_live.days_back
+    pull_live.days_back = lambda count: ["2026-10-18", "2026-10-17"]
+    pull_live.fetch = lambda url: midnight[url.rsplit("/", 1)[1][:-5]]
+    try:
+        crossing = list(pull_live.gather("https://feed.invalid", 2)[head["window"]]["readings"].values())
+    finally:
+        pull_live.fetch, pull_live.days_back = real_fetch, real_days
+    check("a record kept in two days' files is the later file's copy, with the readings of both",
+          [(True, 33375, 2)], [(r.get("final"), r.get("ranked"), len(r["readings"])) for r in crossing])
+
+    # A window the harvest has not built waits in live_pending.json with its
+    # records, and the next pull - the feed by then holding the following one -
+    # meets them at the same minute.
+    scratch_pending = Path(scratch("osirion-pending-")) / "live_pending.json"
+    real_pending, real_argv = pull_live.PENDING, sys.argv
+
+    def feed_main(doc, *flags):
+        pull_live.fetch, pull_live.PENDING = (lambda url: doc), scratch_pending
+        sys.argv = ["pull_live.py", "--from", "https://feed.invalid", "--days", "1", *flags]
+        said = io.StringIO()
+        try:
+            with redirect_stdout(said):
+                pull_live.main()
+        finally:
+            pull_live.fetch, pull_live.PENDING, sys.argv = real_fetch, real_pending, real_argv
+        return said.getvalue()
+
+    cup, head = feed_cup("WaitingCup", built=False)
+    feed_main(feed_doc(head, [ahead[0]]))
+    waiting = json.loads(scratch_pending.read_text(encoding="utf-8")) if scratch_pending.exists() else {}
+    cup, head = feed_cup("WaitingCup")
+    feed_main(feed_doc(head, [ahead[1]]))
+    check("a window kept for the harvest waits with its records, meets the feed's next record at the same "
+          "minute, and is filed once, whole, leaving nothing waiting",
+          ([head["window"]], ahead_board, {}),
+          (list(waiting), feed_board(cup), json.loads(scratch_pending.read_text(encoding="utf-8"))))
+    # The same first page, looked at once before the pull that waited and
+    # once after: the later look's flags, both looks' readings.
+    cup, head = feed_cup("WaitingTwiceCup", built=False)
+    feed_main(feed_doc(head, [seen_twice[0]]))
+    cup, head = feed_cup("WaitingTwiceCup")
+    feed_main(feed_doc(head, [seen_twice[1]]))
+    check("a record waiting is joined to the feed's later look at the same first page, the later one's flags kept",
+          [("18:08", "live feed · final"), ("18:09", "live feed · final"), ("18:10", "live feed · final")],
+          [(when, note) for when, _, _, note in feed_board(cup)])
+
+    # --dry-run says what it would do, and does nothing.
+    cup, head = feed_cup("DryCup")
+    with db.session() as conn:
+        db.add_snapshot(conn, cup, ts="2026-09-29 18:01", points={1000: 19.0}, games=2, note="live feed")
+    before = feed_board(cup)
+    scratch_pending.unlink()
+    told = feed_main(feed_doc(head, list(ahead)), "--dry-run")
+    feed_main(feed_doc(feed_cup("DryWaitingCup", built=False)[1], [ahead[0]]), "--dry-run")
+    check("a dry run counts what it would file or complete, writes nothing and keeps no window waiting",
+          (before, True, False), (feed_board(cup), "2 reading(s) filed" in told, scratch_pending.exists()))
+
     print("\n13. What the publish pushes: nothing private, whoever made the commit")
     # A clone of this repository and a bare one playing GitHub. refresh.py
     # pushes every commit GitHub does not have yet - a run's, or one made by
@@ -2834,6 +3115,93 @@ def measuring_tools(workdir: str, replay_db: str, pages: str, live_db: str) -> N
            all(a["readings_weight"] == b["readings_weight"] for a, b in pairs)))
     sealed = [probe(m, True).forecast(10, live_of(0.95, read, kind="closed_by_game")) for m in (weighted, plain)]
     check("a closed lobby keeps the history's weight as it was", True, sealed[0] == sealed[1])
+
+    # A closed lobby is read one standing per game finished; a session whose
+    # win qualifies has its winners left out of the evening.
+    def lobby_probe(scoring=None, sealed_lobby=True, games=6):
+        t = {"name": "Probe Lobby", "max_games": games}
+        if scoring:
+            t["scoring"] = scoring
+        ev = bench_live.Evening(plain, t, datetime(2026, 7, 20, 18), datetime(2026, 7, 20, 21), sealed_lobby)
+        ev._cold = {r: {"ok": True, "value": 100.0, "source": "previous edition", "rel": 0.2}
+                    for r in (10, 20)}
+        ev._cold.update({r: {"ok": False, "reason": "A win place."} for r in (1, 3)})
+        return ev
+
+    def load(minute, games, points, partial=None, final=False):
+        return {"minute": float(minute), "pages": 1, "ranked": 40, "final": final, "games": games,
+                "partial": partial, "reads": [(r, float(p), None) for r, p in sorted(points.items())]}
+
+    def board(k, extra=0.0):
+        return {10: 30.0 * k + extra, 20: 15.0 * k + extra / 2}
+
+    mid_games = [load(20, 1, board(1)), load(30, 1, board(1, 4)), load(50, 2, board(2)), load(60, 2, board(2, 4)),
+                 load(80, 3, board(3)), load(90, 3, board(3, 4))]
+    raw_lobby = lobby_probe().replay(mid_games).refine()
+    rebuilt_lobby = lobby_probe().replay([dict(m, partial=False) for m in mid_games]).refine()
+    open_queue = lobby_probe(sealed_lobby=False).replay(mid_games).refine()
+    check("a closed lobby read as Osirion has it counts a game once the next one has begun, not the one under way",
+          (2 / 6, 4), (raw_lobby["share"], raw_lobby["entries"]))
+    check("a closed lobby the feed rebuilt counts every game it names, and an open queue every reading",
+          ((3 / 6, 6), 6), ((rebuilt_lobby["share"], rebuilt_lobby["entries"]), open_queue["entries"]))
+
+    def finishing(read_until, flat_from):
+        loads = [load(100, 5, board(5)), load(150, 6, board(5, 10))]
+        loads += [load(m, 6, board(6), final=m > 180) for m in range(flat_from, read_until + 1, 5)]
+        return lobby_probe().replay(loads).refine()
+
+    over, early, fresh = finishing(205, 165), finishing(195, 165), finishing(205, 198)
+    check("the last game of a closed lobby counts once the window is closed, the board held ten minutes and "
+          "read twenty past the close; not before",
+          (True, 1, False, 5 / 6, False, 5 / 6),
+          (over["settled"], over["share"], early["settled"], early["share"], fresh["settled"], fresh["share"]))
+
+    held = [load(60, 2, board(2), partial=False), load(75, 2, board(2), partial=False),
+            load(90, 2, board(2), partial=False)]
+    check("a closed lobby's standing read again unchanged is as fresh as that last reading; an open queue's is history",
+          ([10, 20], None), (sorted((lobby_probe().replay(held).refine() or {"read": []})["read"]),
+                             lobby_probe(sealed_lobby=False).replay(held).refine()))
+
+    heats = {"kill": 1, "kill_cap": 8, "placement": [[1, 1, 1000], [2, 2, 53], [3, 10, 40], [11, 100, 10]]}
+    winners = [load(30, 1, {1: 1009.0, 3: 53.0, **board(1)}), load(60, 2, {1: 1078.0, 3: 1009.0, **board(2)})]
+    plain_cup = [{"kill": 1, "kill_cap": 8, "placement": [[1, 1, 100], [2, 2, 53], [3, 100, 10]]}]
+    wins = lobby_probe(heats).replay([dict(m, partial=False) for m in winners])
+    normal = lobby_probe(plain_cup[0]).replay([dict(m, partial=False) for m in winners])
+    check("where the win qualifies the evening is read without the winners' places; elsewhere every rank is read",
+          (6, [10, 20], 0, [1, 3, 10, 20]),
+          (wins.winners, sorted(wins.refine()["seen"]), normal.winners, sorted(normal.refine()["seen"])))
+    deep = lobby_probe(heats).replay([load(30, 1, {1: 1009.0, 6: 60.0, 7: 58.0, **board(1)}, partial=False)])
+    check("the winners left out are the first places up to one per game, and no further",
+          [7, 10, 20], sorted({r["rank"] for e in deep.live_log() for r in e["readings"]}))
+    check("a record says whether the feed rebuilt its board: a game under way or none, else it did not",
+          (True, True, False), tuple(lobby_probe().replay([load(30, 1, board(1), partial=p)]).log[-1]["rebuilt"]
+                                    for p in (True, False, None)))
+
+    def snap(minute, games, points, partial=None, final=False):
+        return {"minute": float(minute), "games": games, "points": points, "partial": partial, "final": final}
+    run = [snap(10, 1, {1: 10.0}), snap(15, 1, {1: 12.0}), snap(30, 2, {1: 12.0}), snap(35, 2, {1: 12.0}, True),
+           snap(50, 3, {1: 20.0}, True), snap(55, 3, {1: 22.0})]
+    bench_live.mark_rebuilt(run)
+    check("a run of readings under one game count whose numbers moved is a board as Osirion has it; a flat one, "
+          "or a reading with a game under way, is a rebuilt board",
+          [None, None, False, True, True, None], [s["partial"] for s in run])
+    calls = [snap(170, 6, {1: 1.0}, None, True), snap(205, 6, {1: 1.0}, None, True), snap(170, 6, {1: 1.0}, False, True),
+             snap(170, 6, {1: 1.0}, None, False), snap(190, 6, {1: 1.0}, None, True), snap(200, 6, {1: 1.0}, None, True)]
+    bench_live.hold_final(calls, 180.0)
+    check("a lobby the feed could not rebuild is not called final before LATE_MINUTES past the close",
+          [False, True, True, False, False, True], [s["final"] for s in calls])
+    kept = sqlite3.connect(":memory:")
+    kept.executescript("CREATE TABLE snapshot (id INTEGER PRIMARY KEY, competition_id INT, ts TEXT, note TEXT, "
+                       "games INT, pages INT, ranked INT); CREATE TABLE points (snapshot_id INT, rank INT, points REAL);")
+    for i, (stamp, note, games) in enumerate((("2026-07-20 18:30:00", "live feed", 1),
+                                              ("2026-07-20 18:35:00", "live feed", 1),
+                                              ("2026-07-20 18:40:00", "live feed · game under way", 2),
+                                              ("2026-07-20 18:45:00", "live feed", 2)), 1):
+        kept.execute("INSERT INTO snapshot VALUES (?, 7, ?, ?, ?, 1, 40)", (i, stamp, note, games))
+        kept.execute("INSERT INTO points VALUES (?, 1, ?)", (i, 10.0 * games))
+    filed = bench_live.snapshots_of(kept, 7, datetime(2026, 7, 20, 18), datetime(2026, 7, 20, 21))
+    check("the feed's readings carry what the database keeps of the board's rebuilding: the game under way, or none",
+          [False, False, True, False], [s["partial"] for s in filed])
 
     def answer_row(cup, tranche, fr, cold, lobby=False, floor=0):
         return {"id": cup, "lobby": lobby, "tranche": tranche, "readings_weight": 0.5, "from_readings": fr,

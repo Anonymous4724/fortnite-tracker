@@ -85,7 +85,13 @@ the API's ceiling; `kind` and `fncs` where the page reads the category label
 as well as the name; `minutes` where `live.py` rounds the window's length to
 five minutes before matching it; `other` for anything else. A closed lobby is
 clocked on its games, which `live.py` does not mirror: the page's own rules,
-ported, price it.
+ported, price it. So are its games: a board the feed could not rebuild is
+the board as Osirion has it, half updated while a game runs and numbered by
+the games its leaders have started, and counts one standing per game finished
+(`Evening.finished_games`). The database keeps only a mark on a rebuilt board
+with a game under way, so which readings the feed rebuilt is read off the
+readings (`mark_rebuilt`). Where the win itself qualifies (`predict.win_bonus`),
+the first places are the winners' and are left out of the evening.
 
 Ranks priced: every rank the feed read, 10, 25, 100, 250, 500 and 1,000 and the
 cut the page asks first, each where the final standings hold it. The ranks the
@@ -136,6 +142,7 @@ from analysis import bench  # noqa: E402  (puts the app's modules on the path)
 import calibration  # noqa: E402
 import export_model  # noqa: E402
 import harvest_osirion  # noqa: E402
+import predict  # noqa: E402
 import rescore  # noqa: E402
 from analysis import blend, coldbench, live  # noqa: E402
 
@@ -144,6 +151,7 @@ from analysis import blend, coldbench, live  # noqa: E402
 POINTS = (("20 %", 0.2, None), ("40 %", 0.4, None), ("60 %", 0.6, None), ("80 %", 0.8, None),
           ("100 %", 1.0, None), ("+10 min", None, 10), ("+20 min", None, 20))
 FEED_NOTE = "live feed%"
+PARTIAL_NOTE = "game under way"   # what `pull_live` files of a rebuilt board with a game in play
 
 # The page's own numbers, as app.html sets them.
 PACE_MIN_SHARE = 0.2          # below this share the evening gives no live answer
@@ -346,10 +354,46 @@ def snapshots_of(conn, comp_id: int, begin: datetime, end: datetime | None = Non
         known = landed(begin, end, minute, points, arrival, cuts, old)
         out.append({"id": sid, "minute": minute, "known": known, "final": "final" in str(note or ""),
                     "games": int(games or 0), "pages": int(pages or 0), "ranked": int(ranked or 0),
-                    "points": points})
+                    "partial": True if PARTIAL_NOTE in str(note or "") else None, "points": points})
+    mark_rebuilt(out)
     if old and arrival == "feed":
         out = old_cadence(out, begin)
     return out
+
+
+def mark_rebuilt(snapshots: list[dict]) -> None:
+    """Say, for each reading, what the feed said of its board: `partial` is
+    True or False for a lobby's board the feed rebuilt as it stood when its
+    last game ended (True with a game under way), None for one it could not.
+    The database keeps only the True: a board rebuilt with no game in play
+    and one that was not read alike. A rebuilt board changes only when a game
+    ends, so a run of readings under one game count whose numbers moved is
+    the board as Osirion has it, half updated while a game runs; any other
+    run is taken for rebuilt. Set on `snapshots` in place."""
+    runs, run = [], []
+    for snap in snapshots:
+        if run and snap["games"] != run[-1]["games"]:
+            runs.append(run)
+            run = []
+        run.append(snap)
+    if run:
+        runs.append(run)
+    for run in runs:
+        moved = any(a["points"][rank] != b["points"][rank]
+                    for a, b in zip(run, run[1:]) for rank in a["points"].keys() & b["points"].keys())
+        for snap in run:
+            if snap["partial"] is None and not moved:
+                snap["partial"] = False
+
+
+def hold_final(snapshots: list[dict], close: float) -> None:
+    """The feed of today calls a closed lobby whose board it could not rebuild
+    final only LATE_MINUTES past the close (worker.js, `readWindow`): its games
+    are counted as the leaders start them, so a last game still under way
+    looks played. Its earlier calls are taken back, in place."""
+    for snap in snapshots:
+        if snap["final"] and snap["partial"] is None and snap["minute"] - close < live.LATE_MINUTES:
+            snap["final"] = False
 
 
 def old_cadence(snapshots: list[dict], begin: datetime) -> list[dict]:
@@ -386,7 +430,7 @@ def records_of(snapshots: list[dict]) -> list[dict]:
             latest[rank] = (points, minute)
         reads = [(rank, points, None if m == minute else m) for rank, (points, m) in sorted(latest.items())]
         record = {"minute": minute, "pages": snap["pages"], "ranked": snap["ranked"], "final": snap["final"],
-                  "games": snap["games"], "reads": reads}
+                  "games": snap["games"], "partial": snap.get("partial"), "reads": reads}
         if out and out[-1]["minute"] == minute:
             out[-1] = record
         else:
@@ -537,6 +581,9 @@ class Evening:
         self.close = minutes_from(begin, end)                 # s.end, in minutes from the opening
         self.duration = js_round(self.close)                  # STATE.duration
         self.games = int(t.get("max_games") or 0)
+        # Where the win itself qualifies, the first places are the winners',
+        # one per game: readings of them say nothing of a threshold.
+        self.winners = self.games if predict.win_bonus(t.get("scoring") or {}) else 0
         self.pace = model.get("pace") or PACE_DEFAULT
         self.counts = counts            # read the feed's count source (False: as a replay without it)
         self.log: list[dict] = []
@@ -590,7 +637,10 @@ class Evening:
                  "at": updated, "seen": updated, "updated": updated, "readings": kept,
                  "final": bool(record.get("final")), "pages": int(record.get("pages") or 0),
                  "ranked": int(record.get("ranked") or 0),
-                 "ranked_from": ranked_from(record) if self.counts else ""}
+                 "ranked_from": ranked_from(record) if self.counts else "",
+                 # The feed says whether a game is under way only of a board it
+                 # rebuilt (see finished_games).
+                 "rebuilt": record.get("partial") is not None}
         entry["share"] = 1 if entry["final"] else self.live_share(entry["game"], entry["elapsed"])
         return entry
 
@@ -618,6 +668,34 @@ class Evening:
             self.take(record)
         return self
 
+    def finished_games(self, entries: list[dict]) -> list[dict]:
+        """finishedGames: a closed lobby is read one standing per game
+        finished. A board the feed could not rebuild is the board as Osirion
+        has it, numbered by the games its leaders have started, so the game it
+        names can still be under way: such a game counts once the next one has
+        begun, the last one once the window has closed, the feed has read the
+        board SETTLED_AFTER minutes or more past the close and it has held for
+        HELD_MINUTES."""
+        if not self.sealed:
+            return entries
+        raw = [e for e in entries if not e["rebuilt"] and e["game"] > 0]
+        if not raw:
+            return entries
+        playing = max(e["game"] for e in raw)
+        last = raw[-1]
+        read = last["seen"] if last.get("seen") is not None else last["at"]
+        over = (bool(last["final"]) and last["game"] == playing and last["seen"] - last["at"] >= HELD_MINUTES
+                and read - self.close >= SETTLED_AFTER)
+        return entries if over else [e for e in entries if not (not e["rebuilt"] and e["game"] == playing)]
+
+    def live_log(self) -> list[dict]:
+        """liveLog: the feed's readings of the games finished, without the
+        winners' where the win qualifies, each clocked."""
+        entries = self.finished_games(self.log)
+        if self.winners:
+            entries = [dict(e, readings=[r for r in e["readings"] if r["rank"] > self.winners]) for e in entries]
+        return [self.clocked(e) for e in entries if e["readings"]]
+
     def clocked(self, e: dict) -> dict:
         """clocked: the entry's share, and each reading's on its own stamp."""
         owes = self.sealed and 0 < e["game"] < self.games
@@ -644,7 +722,7 @@ class Evening:
     def refine(self, mirror: bool = True) -> dict | None:
         """refine, with the pace a rank is expected to have reached taken from
         `live.expected_share` (`mirror`) or from the page's own rules."""
-        entries = [self.clocked(e) for e in self.log if e["readings"]]
+        entries = self.live_log()
         if not entries:
             return None
         entry = None
@@ -754,7 +832,8 @@ class Evening:
         after = clock["after"] or 0
         rel_pace = rel_at(share, after)
         carried = ((pace.get("carry") or {}).get(kind) or {}).get("slope")
-        best = standing(entries, entry["seen"] if entry.get("seen") is not None else entry["at"])
+        best = standing(entries, entry["seen"] if entry.get("seen") is not None else entry["at"],
+                        kind == "closed_by_game")
         ratios, by_rank, points, norm, rel_of, clock_of, solo, seen = [], {}, {}, {}, {}, {}, {}, {}
         for rank in sorted(best):
             r = best[rank]
@@ -902,15 +981,18 @@ def ranked_capped(entry: dict | None) -> bool:
     return bool(entry) and int(entry.get("pages") or 0) >= PAGES_CAP and entry.get("ranked_from") != "percentile"
 
 
-def standing(entries: list[dict], newest: float) -> dict:
-    """standing: per rank, the richest of the feed's recent readings."""
+def standing(entries: list[dict], newest: float, lobby: bool = False) -> dict:
+    """standing: per rank, the richest of the feed's recent readings. A closed
+    lobby's board stands still while a game is played, and read again
+    unchanged it is as fresh as that last reading (`seen`)."""
     best: dict = {}
     for e in entries:
         for r in e["readings"]:
             if not (r["rank"] >= 1 and r["points"] > 0):
                 continue
             at = r["at"]
-            if newest - at > RECENT_MINUTES and not e["final"]:
+            fresh = max(at, e["seen"]) if lobby and e.get("seen") is not None else at
+            if newest - fresh > RECENT_MINUTES and not e["final"]:
                 continue
             cur = best.get(r["rank"])
             if cur is None or r["points"] > cur["points"] or (r["points"] == cur["points"] and at > cur["at"]):
@@ -1076,6 +1158,8 @@ def price_cup(conn, model: dict, comp: dict, catalogue: dict, cutoff: str, skipp
     read_ranks = {rank for snap in snapshots for rank in snap["points"]}
     wanted = sorted(r for r in (set(bench.RANKS) | read_ranks | ({cut_rank} if cut_rank else set())) if r in finals)
     evening = Evening(model, t, begin, end, lobby)
+    if lobby:
+        hold_final(snapshots, evening.close)
     settled = settled_by_feed(snapshots, evening.close)
     bands = (model.get("quality") or {}).get("bands") or None
     base = {"window": window, "id": comp["id"], "name": comp.get("name") or "",
