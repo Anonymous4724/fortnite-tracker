@@ -1,45 +1,45 @@
 {
-  "band_n": 6306,
+  "band_n": 6403,
   "bands": {
     "50": [
-      -0.247,
-      0.208
+      -0.282,
+      0.154
     ],
     "80": [
-      -0.534,
-      0.525
+      -0.575,
+      0.444
     ],
     "90": [
-      -0.862,
-      0.786
+      -0.944,
+      0.717
     ]
   },
   "baselines": {
     "carry": {
-      "median_ape": 3.26,
-      "model_better_by": 0.08
+      "median_ape": 3.72,
+      "model_better_by": 0.19
     },
     "median": {
       "median_ape": 5.0,
-      "model_better_by": 1.82
+      "model_better_by": 1.48
     },
     "model": {
-      "median_ape": 3.18,
+      "median_ape": 3.53,
       "model_better_by": null
     }
   },
-  "cold_median_ape": 10.39,
-  "cold_share": 0.379,
-  "coverage": 0.924,
-  "from": "2026-09-08",
-  "generated": "2026-10-16",
-  "lobby_median_ape": 21.76,
-  "lobby_rows": 188,
-  "mean_ape": 13.09,
-  "median_ape": 5.85,
+  "cold_median_ape": 10.06,
+  "cold_share": 0.4,
+  "coverage": 0.93,
+  "from": "2026-09-13",
+  "generated": "2026-10-19",
+  "lobby_median_ape": 35.29,
+  "lobby_rows": 143,
+  "mean_ape": 13.45,
+  "median_ape": 6.1,
   "nominal": 0.8,
-  "pool": 7356,
+  "pool": 7464,
   "split": "rolling",
   "targets": 600,
-  "thresholds": 6306
+  "thresholds": 6403
 }
