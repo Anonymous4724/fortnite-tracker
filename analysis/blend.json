@@ -6,26 +6,26 @@
     "after 10+": 0.02
   },
   "by_share_cups": {
-    "0.7-0.9": 456,
-    "0.9-1": 487,
-    "after 0-10": 465,
-    "after 10+": 442
+    "0.7-0.9": 491,
+    "0.9-1": 521,
+    "after 0-10": 500,
+    "after 10+": 477
   },
   "cold": {
     "family": [
-      0.1757,
-      282,
-      28
+      0.1776,
+      344,
+      34
     ],
     "previous edition": [
-      0.2274,
-      2141,
-      217
+      0.2312,
+      1943,
+      197
     ],
     "scoring": [
-      0.2135,
-      1322,
-      130
+      0.2165,
+      1554,
+      152
     ],
     "scoring (thin sample)": [
       0.2457,
@@ -33,11 +33,11 @@
       30
     ]
   },
-  "evenings": 405,
-  "generated": "2026-10-19",
+  "evenings": 413,
+  "generated": "2026-10-22",
   "note": "typical error over the width each side carries, on the evenings the feed followed: the page scales the history's width by cold / reading before blending",
   "reading": {
-    "rows": 79234,
-    "scale": 0.1662
+    "rows": 83776,
+    "scale": 0.1633
   }
 }
